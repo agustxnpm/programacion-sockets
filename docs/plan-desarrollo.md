@@ -31,7 +31,8 @@ A continuación se detalla el mapeo de códigos y la estructura de sus respectiv
 | 0x04   | Chunk Archivo | [Destinatario (20 bytes)] [Bytes del Chunk (máx. 4096)]        |
 | 0x05   | Error         | [Código (1 byte)] [Mensaje (String dinámico)]                   |
 | 0x06   | Difusión      | [Mensaje (String dinámico)]                                     |
-| 0x07   | ACK Archivo   | [Estado de confirmación (1 byte)]                               |
+| 0x07   | ACK Archivo   | [Estado (1 byte): `1` = aceptar/confirmar, `0` = rechazar]     |
+| 0x08   | Login OK      | Sin payload (0 bytes). Enviado por el servidor directamente al cliente que realizó el Login para confirmar su ingreso. |
 
 ### Estructura de Archivos Recomendada (Servidor C)
 
@@ -105,6 +106,7 @@ Este módulo interpreta las reglas de negocio y coordina la distribución de la 
 - **Justificación:** Núcleo lógico que decide el flujo según el OpCode recibido.
 - **Función de Entrada:** `void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t length);`
 - **Comportamientos Clave:**
+  - **Login (`0x01`):** Invoca `add_user`. Si tiene éxito, envía `0x08` (Login OK, payload de 0 bytes) directamente al `src_socket`; inmediatamente después, itera sobre todos los demás descriptores activos enviando un `0x06` (Difusión) notificando el ingreso. Si el nombre está duplicado, envía `0x05` y cierra la conexión.
   - **Mensajería/Archivos:** Validación de destinatario; envío de error (`0x05`) si el usuario no existe.
   - **Difusión:** Iteración sobre descriptores activos (excluyendo origen) bajo bloqueo de lista.
 - **Clarificación:** Si `get_socket_by_name` retorna `-1`, la función `route_message` debe invocar inmediatamente a `write_all` hacia el `src_socket` enviando el OpCode `0x05` antes de finalizar su ejecución.
@@ -122,12 +124,17 @@ Módulo de interacción con el usuario, desarrollado de forma aislada respetando
 ### Tarea 4.2: Hilo de Escucha Asíncrono
 
 - **Justificación:** Evitar el congelamiento de la GUI durante llamadas bloqueantes de red.
-- **Salida:** Hilo secundario que procesa cabeceras y payloads, emitiendo callbacks a la interfaz principal para actualizar la vista.
+- **Salida:** Hilo secundario que procesa cabeceras y payloads, emitiendo callbacks a la interfaz principal para actualizar la vista. Debe manejar explícitamente el evento `0x08` (Login OK) para habilitar los controles de la interfaz únicamente tras recibir la confirmación del servidor, sin asumir éxito por ausencia de error.
 
 ### Tarea 4.3: Controlador de Flujo de Archivos (Chunking)
 
-- **Justificación:** Control de congestión del buffer TCP.
-- **Lógica:** Lectura fragmentada del archivo (4096 bytes). Cada envío de `0x04` requiere la recepción obligatoria de un `0x07` (ACK) antes de procesar el siguiente fragmento.
+- **Justificación:** Control de congestión del buffer TCP e implementación del *handshake* de consentimiento para no saturar el sistema de archivos del receptor.
+- **Lógica (flujo Stop-and-Wait con handshake):**
+  1. Enviar `0x03` (Aviso) con el nombre del destinatario, el tamaño total y el nombre del archivo. Bloquear la interfaz de envío esperando respuesta.
+  2. Aguardar el `0x07` (ACK de aceptación) del receptor, ruteado por el servidor. Si el byte de estado es `0` (rechazo), abortar la operación e informar al usuario.
+  3. Si el byte de estado es `1` (aceptación), leer los primeros 4096 bytes del archivo y enviar `0x04`.
+  4. Aguardar el `0x07` (ACK de fragmento). No enviar ningún byte adicional hasta recibirlo.
+  5. Repetir los pasos 3 y 4 hasta que todos los fragmentos hayan sido enviados y confirmados.
 
 ---
 
