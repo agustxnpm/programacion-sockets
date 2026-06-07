@@ -31,8 +31,7 @@ A continuación se detalla el mapeo de códigos y la estructura de sus respectiv
 | 0x04   | Chunk Archivo | [Destinatario (20 bytes)] [Bytes del Chunk (máx. 4096)]        |
 | 0x05   | Error         | [Código (1 byte)] [Mensaje (String dinámico)]                   |
 | 0x06   | Difusión      | [Mensaje (String dinámico)]                                     |
-| 0x07   | ACK Archivo   | [Estado (1 byte): `1` = aceptar/confirmar, `0` = rechazar]     |
-| 0x08   | Login OK      | Sin payload (0 bytes). Enviado por el servidor directamente al cliente que realizó el Login para confirmar su ingreso. |
+| 0x07   | ACK Polimórfico | [Sub-Código (1 byte)] + [Datos del subtipo]: `0x01` = ACK de Fragmento (1 byte total); `0x02` + `0x01`/`0x00` = ACK de Consentimiento (aceptar/rechazar); `0x03` = ACK de Login Exitoso. Reemplaza al antiguo `0x08`. |
 
 ### Estructura de Archivos Recomendada (Servidor C)
 
@@ -79,13 +78,19 @@ int write_all(int socket_fd, const void* buffer, size_t size);
 - **Justificación:** Gestión de la rutina dedicada por cliente hasta su desconexión.
 - **Proceso:** Implementación de `void* client_handler(void* arg);`, que recibe el descriptor del socket del cliente como un puntero (`int*`). El handler **no implementa el `switch-case`**; su única responsabilidad es extraer los datos crudos y delegar. El orden secuencial de operaciones es:
 
+  0. **Configuración de Timeout (primera instrucción del handler):** Antes de entrar al ciclo de lectura, configurar el timeout de recepción del socket:
+     ```c
+     struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
+     setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+     ```
+     Si el socket no recibe ningún byte durante **10 segundos consecutivos**, la próxima llamada a `read_all` retornará `-1` con `errno == EAGAIN` o `EWOULDBLOCK`.
   1. Llama a `read_all` para obtener los 5 bytes de la cabecera.
   2. Desempaqueta el `Payload Length` y convierte el entero de Network Byte Order a Host Byte Order usando `ntohl()`.
   3. Reserva un buffer temporal y llama a `read_all` para obtener los bytes del payload.
   4. Invoca a `route_message(client_fd, opcode, payload, length)`.
   5. Libera el buffer temporal y repite el ciclo.
 
-- Si hay fallo, se procede al cierre del socket y notificación a la Fase 3.
+- **Manejo de fallos (incluye timeout):** Si `read_all` retorna `0` (desconexión limpia), `-1` por error de red, o `-1` por expiración del `SO_RCVTIMEO` (cliente fantasma), se procede al cierre forzado del socket y a la llamada inmediata a `remove_user(client_fd)`.
 
 ---
 
@@ -106,7 +111,7 @@ Este módulo interpreta las reglas de negocio y coordina la distribución de la 
 - **Justificación:** Núcleo lógico que decide el flujo según el OpCode recibido.
 - **Función de Entrada:** `void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t length);`
 - **Comportamientos Clave:**
-  - **Login (`0x01`):** Invoca `add_user`. Si tiene éxito, envía `0x08` (Login OK, payload de 0 bytes) directamente al `src_socket`; inmediatamente después, itera sobre todos los demás descriptores activos enviando un `0x06` (Difusión) notificando el ingreso. Si el nombre está duplicado, envía `0x05` y cierra la conexión.
+  - **Login (`0x01`):** Invoca `add_user`. Si tiene éxito, envía `0x07` con sub-código `0x03` (ACK de Login Exitoso, payload de 1 byte: `[0x03]`) directamente al `src_socket`; inmediatamente después, itera sobre todos los demás descriptores activos enviando un `0x06` (Difusión) notificando el ingreso. Si el nombre está duplicado, envía `0x05` y cierra la conexión.
   - **Mensajería/Archivos:** Validación de destinatario; envío de error (`0x05`) si el usuario no existe.
   - **Difusión:** Iteración sobre descriptores activos (excluyendo origen) bajo bloqueo de lista.
 - **Clarificación:** Si `get_socket_by_name` retorna `-1`, la función `route_message` debe invocar inmediatamente a `write_all` hacia el `src_socket` enviando el OpCode `0x05` antes de finalizar su ejecución.
@@ -124,17 +129,93 @@ Módulo de interacción con el usuario, desarrollado de forma aislada respetando
 ### Tarea 4.2: Hilo de Escucha Asíncrono
 
 - **Justificación:** Evitar el congelamiento de la GUI durante llamadas bloqueantes de red.
-- **Salida:** Hilo secundario que procesa cabeceras y payloads, emitiendo callbacks a la interfaz principal para actualizar la vista. Debe manejar explícitamente el evento `0x08` (Login OK) para habilitar los controles de la interfaz únicamente tras recibir la confirmación del servidor, sin asumir éxito por ausencia de error.
+- **Salida:** Hilo secundario que procesa cabeceras y payloads, emitiendo callbacks a la interfaz principal para actualizar la vista. Debe manejar explícitamente el evento `0x07` con sub-código `0x03` (ACK de Login Exitoso) para habilitar los controles de la interfaz únicamente tras recibir la confirmación del servidor, sin asumir éxito por ausencia de error.
 
 ### Tarea 4.3: Controlador de Flujo de Archivos (Chunking)
 
 - **Justificación:** Control de congestión del buffer TCP e implementación del *handshake* de consentimiento para no saturar el sistema de archivos del receptor.
 - **Lógica (flujo Stop-and-Wait con handshake):**
   1. Enviar `0x03` (Aviso) con el nombre del destinatario, el tamaño total y el nombre del archivo. Bloquear la interfaz de envío esperando respuesta.
-  2. Aguardar el `0x07` (ACK de aceptación) del receptor, ruteado por el servidor. Si el byte de estado es `0` (rechazo), abortar la operación e informar al usuario.
-  3. Si el byte de estado es `1` (aceptación), leer los primeros 4096 bytes del archivo y enviar `0x04`.
-  4. Aguardar el `0x07` (ACK de fragmento). No enviar ningún byte adicional hasta recibirlo.
+  2. Aguardar el `0x07/0x02` (ACK de Consentimiento) del receptor, ruteado por el servidor. Si el segundo byte del payload es `0x00` (rechazo), abortar la operación e informar al usuario. **Timeout:** si no se recibe respuesta en 10 segundos, abortar.
+  3. Si el segundo byte es `0x01` (aceptación), leer los primeros 4096 bytes del archivo y enviar `0x04`.
+  4. Aguardar el `0x07/0x01` (ACK de Fragmento). No enviar ningún byte adicional hasta recibirlo. **Timeout:** si el ACK no llega en 10 segundos, abortar la transferencia.
   5. Repetir los pasos 3 y 4 hasta que todos los fragmentos hayan sido enviados y confirmados.
+
+---
+
+## Consideraciones Transversales: Seguridad y Tolerancia a Fallos
+
+Esta sección documenta los mecanismos de robustez que deben implementarse durante las Fases 2 y 4. Su ausencia convierte al sistema en un protocolo frágil ante desconexiones inesperadas o procesos que dejan de responder.
+
+### Contexto: TCP vs. Capa de Aplicación
+
+TCP garantiza la entrega de bytes en orden dentro de los buffers del kernel, pero **no puede detectar** que un proceso remoto se congeló sin cerrar el socket. Se definen dos escenarios críticos:
+
+- **Pérdida de paquetes físicos:** Resuelta por el retransmisor TCP del kernel. Completamente transparente para la aplicación.
+- **Cliente Fantasma:** Un proceso que deja de vaciar el buffer del socket (por deadlock, *hang* de GUI, etc.) sin enviar `FIN`. El FD permanece abierto pero nadie lee datos; el `client_handler` queda bloqueado indefinidamente en el próximo `write_all` hacia ese cliente.
+
+### Tarea T-FT1: Timeout en el Servidor C — `SO_RCVTIMEO`
+
+- **Módulo:** `network.c` — función `client_handler`.
+- **Primitiva del sistema:** `setsockopt(3)` con la opción `SO_RCVTIMEO`. Debe ser la **primera instrucción** del handler, antes del ciclo de lectura.
+- **Firma lógica requerida:**
+
+```c
+// Primera instrucción de client_handler, antes del ciclo de lectura:
+struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
+setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+```
+
+- **Comportamiento:** Si el socket no recibe ningún byte durante **10 segundos consecutivos**, `read_all` retorna `-1` con `errno == EAGAIN` o `EWOULDBLOCK`. El handler debe tratar este caso como una desconexión: `close(client_fd)` → `remove_user(client_fd)` → retorno del hilo.
+
+### Tarea T-FT2: Timeout en el Cliente Python — ACK Lógico de Transferencia
+
+- **Módulo:** Hilo de envío de archivos (`Tarea 4.3`).
+- **Primitiva:** `socket.settimeout(10.0)` aplicada antes de cada `recv()` bloqueante que espera un `0x07` (ACK de Consentimiento `0x07/0x02` o ACK de Fragmento `0x07/0x01`).
+- **Firma lógica requerida:**
+
+```python
+sock.settimeout(10.0)
+try:
+    ack_header = recv_all(sock, 5)
+    # Interpretar sub-código 0x01 o 0x02
+except socket.timeout:
+    abort_transfer()
+    notify_ui("Transferencia abortada: timeout esperando ACK del destinatario.")
+finally:
+    sock.settimeout(None)  # Restaurar modo bloqueante
+```
+
+### Tarea T-FT3: Flujo de Error en Tránsito — Circuit Breaker
+
+- **Escenario:** Cliente A transmite fragmentos `0x04` hacia Cliente B. El servidor detecta que B se desconectó (violentamente o por expiración del `SO_RCVTIMEO`) y ejecuta `remove_user(fd_b)`.
+- **Comportamiento esperado en `router.c`:**
+  1. A envía el siguiente `0x04` con destino B.
+  2. `route_message` invoca `get_socket_by_name(nombre_b)` → retorna `-1`.
+  3. El servidor **frena el enrutamiento** y envía a A el OpCode `0x05` con el texto exacto: `"Transferencia abortada: El destinatario se ha desconectado"`.
+  4. El hilo emisor de A recibe el `0x05`, aborta y notifica al usuario.
+- **Firma lógica requerida en `router.c`:**
+
+```c
+case 0x04: {
+    char dest_name[21] = {0};
+    memcpy(dest_name, payload, 20);
+    int dest_fd = get_socket_by_name(dest_name);
+    if (dest_fd == -1) {
+        const char *msg = "Transferencia abortada: El destinatario se ha desconectado";
+        uint8_t err_sub = 0x01;
+        uint32_t err_len = htonl(1 + strlen(msg));
+        uint8_t op = 0x05;
+        write_all(src_socket, &op, 1);
+        write_all(src_socket, &err_len, 4);
+        write_all(src_socket, &err_sub, 1);
+        write_all(src_socket, msg, strlen(msg));
+        return;
+    }
+    // ... enrutar fragmento normalmente hacia dest_fd
+    break;
+}
+```
 
 ---
 
