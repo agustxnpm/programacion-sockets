@@ -112,7 +112,7 @@ Este módulo interpreta las reglas de negocio y coordina la distribución de la 
 - **Función de Entrada:** `void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t length);`
 - **Comportamientos Clave:**
   - **Login (`0x01`):** Invoca `add_user`. Si tiene éxito, envía `0x07` con sub-código `0x03` (ACK de Login Exitoso, payload de 1 byte: `[0x03]`) directamente al `src_socket`; inmediatamente después, itera sobre todos los demás descriptores activos enviando un `0x06` (Difusión) notificando el ingreso. Si el nombre está duplicado, envía `0x05` y cierra la conexión.
-  - **Mensajería/Archivos:** Validación de destinatario; envío de error (`0x05`) si el usuario no existe.
+  - **Mensajería/Archivos:** Validación de destinatario; envío de error (`0x05`) si el usuario no existe. **Regla especial para `0x03` (Inicio Archivo):** Antes de rutar, el servidor debe extraer el tamaño total del archivo del payload. Si este valor excede el límite máximo permitido (por ejemplo, 100 MB), se debe abortar el enrutamiento y devolver un error `0x05` al emisor indicando que el archivo es demasiado grande.
   - **Difusión:** Iteración sobre descriptores activos (excluyendo origen) bajo bloqueo de lista.
 - **Clarificación:** Si `get_socket_by_name` retorna `-1`, la función `route_message` debe invocar inmediatamente a `write_all` hacia el `src_socket` enviando el OpCode `0x05` antes de finalizar su ejecución.
 
@@ -135,7 +135,7 @@ Módulo de interacción con el usuario, desarrollado de forma aislada respetando
 
 - **Justificación:** Control de congestión del buffer TCP e implementación del *handshake* de consentimiento para no saturar el sistema de archivos del receptor.
 - **Lógica (flujo Stop-and-Wait con handshake):**
-  1. Enviar `0x03` (Aviso) con el nombre del destinatario, el tamaño total y el nombre del archivo. Bloquear la interfaz de envío esperando respuesta.
+  1. Enviar `0x03` (Aviso) con el nombre del destinatario, el tamaño total y el nombre del archivo. Bloquear la interfaz de envío esperando respuesta. *(Nota: El cliente también debe implementar internamente una consideración sobre el límite de tamaño máximo antes del envío, sin entrar en más detalles aquí).*
   2. Aguardar el `0x07/0x02` (ACK de Consentimiento) del receptor, ruteado por el servidor. Si el segundo byte del payload es `0x00` (rechazo), abortar la operación e informar al usuario. **Timeout:** si no se recibe respuesta en 10 segundos, abortar.
   3. Si el segundo byte es `0x01` (aceptación), leer los primeros 4096 bytes del archivo y enviar `0x04`.
   4. Aguardar el `0x07/0x01` (ACK de Fragmento). No enviar ningún byte adicional hasta recibirlo. **Timeout:** si el ACK no llega en 10 segundos, abortar la transferencia.

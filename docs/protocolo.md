@@ -14,6 +14,8 @@ La cabecera se divide en dos partes:
 ## 2. Las operaciones y el contenido (Payload)
 Una vez que el servidor o el cliente leen los 5 bytes del encabezado, se fijan cuál es la operación (OpCode) para saber qué viene adentro. Aquí están todas las acciones permitidas en nuestro chat:
 
+> **Límite de Usuarios:** El servidor admite un máximo de **100 usuarios conectados simultáneamente**. Si un cliente intenta iniciar sesión (Login) cuando el servidor está lleno, o si usa un nombre que ya se encuentra en uso, el servidor rechazará la conexión enviando un OpCode de Error (`0x05`) y cerrará el socket.
+
 | Número de operación (OpCode) | ¿Qué significa? | ¿Qué viene en el contenido? (Payload) |
 |---|---|---|
 | 1 (0x01) | Login | Nombre del usuario. |
@@ -43,6 +45,11 @@ Para que la red no colapse, los archivos grandes no se mandan de golpe, se manda
 ## 3. ¿Cómo enviamos un archivo sin romper nada?
 Usamos un sistema de "enviar y esperar" (Stop-and-Wait) con un *handshake* de consentimiento previo.
 
+**¿Por qué avisamos el tamaño total del archivo previamente?**
+Enviar el tamaño total en el aviso inicial (`0x03`) cumple dos roles vitales:
+1. **Prevención del receptor:** Permite al destinatario verificar si tiene suficiente espacio en disco o si simplemente desea rechazar un archivo excesivamente grande antes de empezar a recibir miles de fragmentos.
+2. **Protección del servidor:** Le permite al servidor establecer y hacer cumplir un **límite de tamaño máximo** (por ejemplo, 100 MB), protegiendo la red de transferencias abusivas que puedan saturar el ancho de banda.
+
 > **Nota Técnica — ¿Por qué controlar el flujo en la capa de aplicación si TCP ya lo hace?**
 > TCP garantiza la entrega de proceso a proceso y el orden de los datos en los buffers del kernel del sistema operativo, pero **no conoce la lógica interna de la aplicación**. El control de flujo a nivel de aplicación es obligatorio por dos razones:
 > 1. **Evitar el *Head-of-Line Blocking*:** Si enviáramos un archivo de 50 MB de forma continua, ese flujo acapararía el socket bloqueando los mensajes de texto cortos del chat hasta su finalización completa.
@@ -50,11 +57,20 @@ Usamos un sistema de "enviar y esperar" (Stop-and-Wait) con un *handshake* de co
 
 El protocolo para transferir un archivo tiene los siguientes cinco pasos:
 
-1. **Aviso y consentimiento:** Cliente A envía la operación `0x03` al Servidor con el nombre del destinatario, el tamaño total y el nombre del archivo. El Servidor lo rutea al Cliente B.
+1. **Aviso y validación de tamaño:** Cliente A envía la operación `0x03` al Servidor con el nombre del destinatario, el tamaño total y el nombre del archivo. El Servidor primero lee este tamaño; **si supera el valor máximo permitido (ej. 100 MB), rechaza la petición** devolviendo inmediatamente un error `0x05` a A. Si el tamaño es válido, el Servidor lo rutea al Cliente B. *(Nota: El cliente también debe implementar ciertos mecanismos relacionados a este límite de capacidad antes de enviar, pero sus detalles se omiten en esta especificación).*
 2. **Respuesta del receptor:** Cliente B decide si acepta la transferencia y responde con la operación `0x07`, sub-código `0x02` (ACK de Consentimiento): payload `[0x02, 0x01]` si acepta o `[0x02, 0x00]` si rechaza. El Servidor rutea ese ACK hacia el Cliente A.
 3. **Inicio de la transferencia (solo si hubo aceptación):** Si A recibió el ACK de Consentimiento con segundo byte `0x01`, envía la operación `0x04` con los primeros 4096 bytes del archivo. Si el segundo byte es `0x00`, cancela la operación.
 4. **Pausa obligatoria:** Cliente A se detiene. No envía ningún fragmento adicional hasta recibir confirmación.
 5. **ACK de fragmento y continuación:** Cliente B recibe el fragmento, lo escribe en disco y responde con la operación `0x07`, sub-código `0x01` (ACK de Fragmento): payload `[0x01]`. El Servidor rutea ese ACK hacia A. Al recibirlo, A envía el siguiente fragmento. Los pasos 3 a 5 se repiten hasta completar el archivo.
+
+### 3.1 Nota técnica para Servidores: Rastreo de Emisores
+Dado que el OpCode `0x07` (ACK Polimórfico) para archivos (`0x01` y `0x02`) no incluye el nombre del destinatario original en su payload (solo ocupa 1 o 2 bytes), el servidor requiere un mecanismo interno de **rastreo de emisores**.
+
+1. **Registro:** Cuando el servidor rutea un aviso (`0x03`) o un fragmento (`0x04`) del Cliente A hacia el Cliente B, debe guardar en una estructura interna (ej. un mapa o arreglo) que "B está recibiendo información de A".
+2. **Enrutamiento del ACK:** Cuando el Cliente B responde con un `0x07` asociado a un archivo, el servidor busca en su registro quién le estaba enviando el archivo a B (en este caso, A) y le reenvía el paquete.
+
+**Limitación del Protocolo (Transferencias Simultáneas):**
+Debido a que este rastreo asocia a un receptor con un único emisor activo a la vez en la memoria del servidor, **este protocolo no soporta múltiples transferencias de archivos simultáneas dirigidas exactamente al mismo destinatario**. Si un Cliente C intenta enviarle un archivo a B mientras A ya le está enviando uno, el servidor sobrescribirá el registro y los ACKs de B se rutearán incorrectamente. Para los alcances técnicos de este Trabajo Práctico, esta limitación estructural es conocida y aceptada.
 
 ## 4. Ejemplos reales (paso a paso)
 Para que quede claro cómo viajan los números por el cable de red.
