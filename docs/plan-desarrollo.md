@@ -27,11 +27,12 @@ A continuación se detalla el mapeo de códigos y la estructura de sus respectiv
 |--------|---------------|-----------------------------------------------------------------|
 | 0x01   | Login         | [Nombre de Usuario (String dinámico)]                           |
 | 0x02   | Privado       | [Destinatario (20 bytes)] [Mensaje (String dinámico)]           |
-| 0x03   | Inicio Archivo| [Destinatario (20 bytes)] [Nombre (String)] [Tamaño (8 bytes)] |
+| 0x03   | Inicio Archivo| [Destinatario (20 bytes)] [Tamaño (8 bytes)] [Nombre (String)] |
 | 0x04   | Chunk Archivo | [Destinatario (20 bytes)] [Bytes del Chunk (máx. 4096)]        |
 | 0x05   | Error         | [Código (1 byte)] [Mensaje (String dinámico)]                   |
 | 0x06   | Difusión      | [Mensaje (String dinámico)]                                     |
 | 0x07   | ACK Polimórfico | [Sub-Código (1 byte)] + [Datos del subtipo]: `0x01` = ACK de Fragmento + Emisor(20); `0x02` + `0x01`/`0x00` + Emisor(20) = ACK de Consentimiento; `0x03` = ACK de Login Exitoso. Reemplaza al antiguo `0x08`. |
+| 0xFF   | Heartbeat (Keepalive) | Ninguno (0 bytes). Enviado periódicamente por el cliente para resetear el `SO_RCVTIMEO` del servidor. El servidor lo ignora silenciosamente. |
 
 ### Estructura de Archivos Recomendada (Servidor C)
 
@@ -90,7 +91,7 @@ int write_all(int socket_fd, const void* buffer, size_t size);
   4. Invoca a `route_message(client_fd, opcode, payload, length)`.
   5. Libera el buffer temporal y repite el ciclo.
 
-- **Manejo de fallos (incluye timeout):** Si `read_all` retorna `0` (desconexión limpia), `-1` por error de red, o `-1` por expiración del `SO_RCVTIMEO` (cliente fantasma), se procede al cierre forzado del socket y a la llamada inmediata a `remove_user(client_fd)`.
+- **Manejo de fallos (incluye timeout):** Si `read_all` retorna `0` (desconexión limpia), `-1` por error de red, o `-1` por expiración del `SO_RCVTIMEO` (cliente fantasma), se procede a la llamada inmediata a `handle_disconnect(client_fd)`, que elimina al usuario de la lista activa, cierra el socket y difunde su desconexión al resto de clientes.
 
 ---
 
@@ -106,6 +107,7 @@ Este módulo interpreta las reglas de negocio y coordina la distribución de la 
   - `void remove_user(int socket_fd);`: Elimina al usuario de la lista y cierra el socket limpiamente.
   - `int get_socket_by_name(const char* name);`: Busca el descriptor del socket. Retorna FD o `-1` (no encontrado).
   - `int get_name_by_socket(int socket_fd, char* out_name);`: Resuelve el nombre de usuario desde su FD.
+  - `void get_all_active_sockets(int* dest_fds, int* count);`: Devuelve los FDs de todos los usuarios activos. Usado para difusión (`0x06`) y notificación de desconexión.
   - `void get_all_active_names_except(int exclude_fd, char dest_names[][MAX_USERNAME_LEN + 1], int* count);`: Obtiene nombres activos para notificar al recién conectado.
 
 ### Tarea 3.2: Enrutador de Mensajes (Switch-Case Principal)
@@ -118,6 +120,7 @@ Este módulo interpreta las reglas de negocio y coordina la distribución de la 
   - **Transferencias Concurrentes:** Al reenviar `0x03/0x04`, el servidor sustituye el campo inicial de 20 bytes por el nombre del emisor; los ACKs de archivo incluyen ese emisor y se enrutan de forma determinística incluso con múltiples emisores al mismo receptor.
   - **Concurrencia de escritura:** El servidor serializa envíos por `fd` destino para evitar intercalado de bytes cuando varios hilos escriben al mismo socket.
   - **Difusión:** Iteración sobre descriptores activos (excluyendo origen) bajo bloqueo de lista.
+  - **Desconexión (`handle_disconnect`):** Al salir del ciclo de lectura, `client_handler` invoca `handle_disconnect(client_fd)` en lugar de `remove_user`. Esta función obtiene el nombre del usuario desde su FD, llama a `remove_user()` (elimina de la lista y cierra el socket) y luego difunde `0x06` con el texto `"X se ha desconectado"` a todos los clientes restantes.
 - **Clarificación:** Si `get_socket_by_name` retorna `-1`, la función `route_message` debe invocar inmediatamente a `write_all` hacia el `src_socket` enviando el OpCode `0x05` antes de finalizar su ejecución.
 
 ---
@@ -129,11 +132,12 @@ Módulo de interacción con el usuario, desarrollado de forma aislada respetando
 ### Tarea 4.1: Módulo de Serialización (Capa de Red)
 
 - **Justificación:** Conversión de objetos de alto nivel a bytes estructurados mediante `struct.pack()`, respetando el endianness acordado.
+- **Convención de identificación del emisor (0x02 y 0x06):** El protocolo no agrega el nombre del remitente en los OpCodes 0x02 y 0x06 (a diferencia de 0x03/0x04 que reescriben el campo de 20 bytes). Para que el receptor pueda identificar quién envió el mensaje, los clientes anteponen su propio nombre al texto con el formato `[nombre_emisor]: mensaje` antes de serializar el paquete. El receptor aplica el parser inverso para extraer el remitente y mostrarlo en la interfaz.
 
 ### Tarea 4.2: Hilo de Escucha Asíncrono
 
 - **Justificación:** Evitar el congelamiento de la GUI durante llamadas bloqueantes de red.
-- **Salida:** Hilo secundario que procesa cabeceras y payloads, emitiendo callbacks a la interfaz principal para actualizar la vista. Debe manejar explícitamente el evento `0x07` con sub-código `0x03` (ACK de Login Exitoso) para habilitar los controles de la interfaz únicamente tras recibir la confirmación del servidor, sin asumir éxito por ausencia de error.
+- **Salida:** Hilo secundario que procesa cabeceras y payloads, emitiendo callbacks a la interfaz principal para actualizar la vista. Debe manejar explícitamente el evento `0x07` con sub-código `0x03` (ACK de Login Exitoso) para habilitar los controles de la interfaz únicamente tras recibir la confirmación del servidor, sin asumir éxito por ausencia de error. El listener también reconoce `0x06` con sufijo `" se ha desconectado"` para eliminar al usuario del panel lateral y abortar transferencias activas si el destinatario era ese usuario.
 
 ### Tarea 4.3: Controlador de Flujo de Archivos (Chunking)
 
@@ -144,6 +148,16 @@ Módulo de interacción con el usuario, desarrollado de forma aislada respetando
   3. Si el segundo byte es `0x01` (aceptación), leer los primeros 4096 bytes del archivo y enviar `0x04`.
   4. Aguardar el `0x07/0x01` (ACK de Fragmento, con emisor). No enviar ningún byte adicional hasta recibirlo. **Timeout:** 30 segundos.
   5. Repetir los pasos 3 y 4 hasta que todos los fragmentos hayan sido enviados y confirmados.
+
+### Tarea 4.4: Heartbeat — Keepalive Periódico
+
+- **Justificación:** El servidor aplica un `SO_RCVTIMEO` de 10 segundos para detectar clientes fantasma. Sin un mecanismo de keepalive, un cliente legítimamente inactivo (sin mensajes que enviar) sería expulsado por inactividad.
+- **Especificación:** Un hilo daemon envía un paquete con OpCode `0xFF` y payload vacío cada **8 segundos** mientras la conexión esté activa:
+  ```python
+  protocol.build_packet(0xFF, b'')
+  ```
+  El intervalo de 8 s garantiza que siempre haya al menos un heartbeat antes de que el `SO_RCVTIMEO` del servidor expire, incluso ante variaciones de latencia.
+- **Comportamiento del servidor:** No existe `case 0xFF` en el `switch-case` de `route_message`. El paquete es recibido (reseteando el temporizador de inactividad) y descartado silenciosamente.
 
 ---
 
@@ -199,6 +213,14 @@ if not chunk_ack_event.wait(timeout=30):
 - **Firma lógica requerida en `router.c`:**
 
 ```c
+case 0x03: {
+    // Si el destinatario no existe en el momento del aviso inicial:
+    if (dest_fd == -1) {
+        send_error(src_socket, "El usuario destinatario no existe o no está conectado");
+        return;
+    }
+    // ... reenviar aviso normalmente
+}
 case 0x04: {
     char dest_name[21] = {0};
     memcpy(dest_name, payload, 20);

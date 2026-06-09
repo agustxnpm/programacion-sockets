@@ -19,10 +19,11 @@ Una vez que el servidor o el cliente leen los 5 bytes del encabezado, se fijan c
 | Número de operación (OpCode) | ¿Qué significa? | ¿Qué viene en el contenido? (Payload) |
 |---|---|---|
 | 1 (0x01) | Login | Nombre del usuario. |
-| 2 (0x02) | Mensaje privado | Primero el nombre del destinatario (siempre ocupa 20 lugares, si el nombre es corto se rellena con ceros) + El Texto del mensaje. |
+| 2 (0x02) | Mensaje privado | Primero el nombre del destinatario (siempre ocupa 20 lugares, si el nombre es corto se rellena con ceros) + El Texto del mensaje. **Convención de identificación del emisor:** dado que el servidor reenvía el payload íntegro sin agregar el nombre del remitente, los clientes **deben** incluir su propio nombre al inicio del texto con el formato `[nombre_emisor]: mensaje`. El receptor parsea ese prefijo para mostrar quién envió el mensaje. |
 | 5 (0x05) | Error | Un número de error (ej. 1) + El texto del error (ej: "Usuario no existe"). |
-| 6 (0x06) | Mensaje a todos (Difusión) | Solo el texto del mensaje. (No hace falta destinatario porque va para todos). |
+| 6 (0x06) | Mensaje a todos (Difusión) | Solo el texto del mensaje. El servidor también usa este opcode para **eventos de sistema**: al conectarse un usuario emite `"X se ha conectado"` y al desconectarse emite `"X se ha desconectado"`. **Convención de identificación del emisor (mensajes de usuario):** cuando un cliente envía una difusión, aplica la misma convención que en 0x02: antepone `[nombre_emisor]: ` al texto. Los mensajes de sistema emitidos por el servidor **no** usan este prefijo; el receptor los distingue por los sufijos `" se ha conectado"` / `" se ha desconectado"`. |
 | 7 (0x07) | **ACK Polimórfico** (Confirmación Generalizada) | El primer byte del payload es el **Sub-Código de Tipo**, que determina el significado del mensaje. Ver tabla de Sub-Códigos a continuación. |
+| 255 (0xFF) | Heartbeat (Keepalive) | Ninguno (payload vacío). Enviado periódicamente por el cliente para evitar que el `SO_RCVTIMEO` del servidor lo detecte como cliente fantasma. **El servidor ignora silenciosamente este opcode.** |
 
 ### Sub-Códigos del OpCode `0x07` (ACK Polimórfico)
 
@@ -117,6 +118,15 @@ Bob manda el texto "Hola" (4 letras) a "Alice". Como el nombre del destinatario 
   - Agarra los primeros 20 bytes del contenido: "Busco en mi lista si Alice está conectada".
   - Encuentra a Alice, agarra el mensaje completo y se lo reenvía a ella.
 
+### Ejemplo C: Bob se desconecta
+Bob cierra la aplicación (o pierde la conexión). El servidor detecta la desconexión al retornar `read_all()` `0` o `-1` en el hilo de Bob.
+
+**Servidor → Todos los demás** (difusión de salida, `0x06`):
+```
+[ 6 ] [ 0, 0, 0, 21 ] [ 'B', 'o', 'b', ' ', 's', 'e', ' ', 'h', 'a', ' ', 'd', 'e', 's', 'c', 'o', 'n', 'e', 'c', 't', 'a', 'd', 'o' ]
+```
+- El servidor obtiene el nombre de Bob a partir de su FD, lo elimina de la lista activa, cierra el socket, y luego envía el `0x06` a todos los usuarios restantes.
+- Cada cliente que recibe este mensaje reconoce el sufijo `" se ha desconectado"` y elimina a Bob de su panel de usuarios activos.
 ## 5. Tolerancia a Fallos y Gestión de Timeouts
 
 ### 5.1 Separación de Responsabilidades: TCP vs. Capa de Aplicación
@@ -180,3 +190,17 @@ if not chunk_ack_event.wait(timeout=CHUNK_ACK_TIMEOUT_SEC):
 4. El hilo de envío de A recibe el `0x05`, aborta inmediatamente la transferencia y notifica al usuario.
 
 Este mecanismo implementa el patrón **Circuit Breaker**: el servidor actúa como intermediario que detecta la ruptura del circuito y notifica proactivamente al emisor, evitando que quede bloqueado hasta que expire su propio timeout.
+
+### 5.6 Heartbeat del Cliente: OpCode `0xFF`
+
+El **Heartbeat** es un mecanismo complementario al `SO_RCVTIMEO` del servidor. Sin él, un cliente legítimamente inactivo (sin mensajes que enviar durante más de 10 segundos) sería expulsado por el servidor como si fuera un cliente fantasma.
+
+**Funcionamiento:**
+- El cliente envía un paquete con **OpCode `0xFF`** y **payload vacío (0 bytes)** cada **8 segundos** mientras está conectado:
+```
+[ 255 ] [ 0, 0, 0, 0 ]
+```
+- El servidor **no tiene un `case 0xFF`** en su `switch-case` y descarta el paquete silenciosamente.
+- Pero el hecho de recibir cualquier dato resetea el temporizador interno del `SO_RCVTIMEO`, por lo que el servidor nunca expira la conexión de un cliente que envía heartbeats.
+
+**¿Por qué 8 segundos y no 10?** El intervalo de 8 s es deliberadamente menor al timeout del servidor (10 s) para garantizar que al menos un heartbeat llegue antes del vencimiento, incluso ante variaciones de latencia.

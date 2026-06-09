@@ -126,7 +126,7 @@ int write_all(int socket_fd, const void* buffer, size_t size) {
  *   4. Reserva buffer y lee el payload completo.
  *   5. Delega a route_message().
  *   6. Libera buffer y repite.
- *   Al salir: cierra socket y llama a remove_user().
+ *   Al salir: invoca handle_disconnect() — notifica al resto, cierra socket, libera estado.
  * ───────────────────────────────────────────── */
 void* client_handler(void* arg) {
     int client_fd = *((int*)arg);
@@ -203,7 +203,7 @@ void* client_handler(void* arg) {
     }
 
     /* ── Limpieza al salir del ciclo ──────────────────────────────────── */
-    remove_user(client_fd);  /* Cierra el socket y elimina de la lista activa */
+    handle_disconnect(client_fd);  /* Notifica desconexión, cierra socket y elimina de la lista */
 
     return NULL;
 }

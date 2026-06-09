@@ -31,8 +31,9 @@ HOST         = "127.0.0.1"
 PORT         = 9100
 DOWNLOAD_DIR = Path.home() / "Descargas"
 
-# Patrón que el servidor emite al conectar un usuario (router.c, caso 0x01)
-_CONNECT_SUFFIX = " se ha conectado"
+# Patrones que el servidor emite como difusión (router.c, caso 0x01 y handle_disconnect)
+_CONNECT_SUFFIX    = " se ha conectado"
+_DISCONNECT_SUFFIX = " se ha desconectado"
 
 
 class ChatApp:
@@ -181,10 +182,25 @@ class ChatApp:
         text = payload.decode('utf-8', errors='replace')
 
         # El servidor emite "X se ha conectado" al hacer login (router.c, 0x01)
-        if text.endswith(_CONNECT_SUFFIX):
+        if text.endswith(_CONNECT_SUFFIX) and not text.startswith('['):
             username = text[: -len(_CONNECT_SUFFIX)]
             self._chat_view.add_user(username)
             self._chat_view.show_system(text)
+            return
+
+        # El servidor emite "X se ha desconectado" en handle_disconnect
+        if text.endswith(_DISCONNECT_SUFFIX) and not text.startswith('['):
+            username = text[: -len(_DISCONNECT_SUFFIX)]
+            self._chat_view.remove_user(username)
+            self._chat_view.show_system(text)
+            # Abortar transferencia activa si el destinatario era ese usuario
+            if self._file_ctrl and self._file_ctrl._dest == username:
+                self._file_ctrl.abort()
+                self._chat_view.set_transfer_active(False)
+                self._chat_view.show_error(
+                    f"Transferencia: '{username}' se ha desconectado."
+                )
+                self._file_ctrl = None
             return
 
         self._chat_view.show_broadcast(text)

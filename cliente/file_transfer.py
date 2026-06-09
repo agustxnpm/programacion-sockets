@@ -26,8 +26,8 @@ class FileTransferController:
     Flujo Stop-and-Wait:
       1. Validar tamaño local (< 100 MB).
       2. Enviar aviso 0x03 (dest, size, filename).
-      3. Esperar consentimiento 0x07/0x02 (timeout 10 s).
-      4. Si aceptado: loop de chunks → enviar 0x04 → esperar ACK 0x07/0x01.
+      3. Esperar consentimiento 0x07/0x02 (timeout 30 s).
+      4. Si aceptado: loop de chunks → enviar 0x04 → esperar ACK 0x07/0x01 (timeout 30 s).
       5. Llamar on_done() al terminar o on_error(msg) ante cualquier fallo.
     """
 

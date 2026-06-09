@@ -62,7 +62,8 @@ int write_all(int socket_fd, const void* buffer, size_t size);
  *   4. Delegar a route_message(client_fd, opcode, payload, length).
  *   5. Liberar el buffer y repetir hasta que read_all() indique desconexión o error.
  *
- * Al salir del bucle: cierra el socket y llama a remove_user() para liberar el estado.
+ * Al salir del bucle: invoca handle_disconnect() para difundir la desconexión,
+ * cerrar el socket y liberar el estado del usuario.
  * Este handler NO contiene switch-case; toda la lógica de OpCodes vive en router.c.
  */
 void* client_handler(void* arg);

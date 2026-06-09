@@ -50,4 +50,13 @@
  */
 void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t length);
 
+/*
+ * Gestiona la desconexión de un cliente.
+ * Obtiene el nombre del usuario que se desconectó, lo elimina de la lista
+ * activa (cerrando el socket), y difunde OpCode 0x06 con el texto
+ * "X se ha desconectado" a todos los clientes restantes.
+ * Debe invocarse en lugar de remove_user() al finalizar client_handler().
+ */
+void handle_disconnect(int client_fd);
+
 #endif /* ROUTER_H */

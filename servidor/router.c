@@ -58,6 +58,30 @@ static void send_error(int dest_socket, const char* msg) {
     free(payload);
 }
 
+/* ─────────────────────────────────────────────
+ * handle_disconnect
+ * Llamado por client_handler al detectar desconexión.
+ * Obtiene el nombre del usuario, lo elimina de la lista activa
+ * (cerrando el socket) y difunde "X se ha desconectado" al resto.
+ * ───────────────────────────────────────────── */
+void handle_disconnect(int client_fd) {
+    char username[MAX_USERNAME_LEN + 1] = {0};
+    int has_name = get_name_by_socket(client_fd, username);
+
+    remove_user(client_fd); /* cierra socket y lo elimina de la lista */
+
+    if (has_name) {
+        char msg[MAX_USERNAME_LEN + 32];
+        snprintf(msg, sizeof(msg), "%s se ha desconectado", username);
+        int fds[MAX_FDS];
+        int count = 0;
+        get_all_active_sockets(fds, &count);
+        for (int i = 0; i < count; i++) {
+            send_packet_locked(fds[i], 0x06, msg, (uint32_t)strlen(msg));
+        }
+    }
+}
+
 /* Esta es la gran función que decide qué hacer cuando recibimos un mensaje */
 void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t length) {
     /* El 'switch' toma decisiones basadas en el OpCode (el tipo de mensaje) */
@@ -68,6 +92,12 @@ void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t
             /* Evita un error si nos mandan un nombre súper largo: solo toma los caracteres permitidos */
             uint32_t name_len = length > MAX_USERNAME_LEN ? MAX_USERNAME_LEN : length;
             
+            if (name_len == 0) {
+                send_error(src_socket, "El nombre de usuario no puede estar vacio");
+                shutdown(src_socket, SHUT_RDWR);
+                break;
+            }
+
             /* Copia el nombre extraído del contenido (payload) hacia nuestro espacio 'name' */
             memcpy(name, payload, name_len); 
             
@@ -141,9 +171,12 @@ void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t
             /* Busca la conexión asociada a ese nombre */
             int dest_fd = get_socket_by_name(dest_name);
             if (dest_fd == -1) { /* Si no lo encontró, está desconectado o no existe */
-                if (opcode == 0x04 || opcode == 0x03) {
-                    /* Si es transferencia de archivo, usamos el error oficial documentado */
+                if (opcode == 0x04) {
+                    /* Circuit Breaker: destinatario se desconectó durante una transferencia activa */
                     send_error(src_socket, "Transferencia abortada: El destinatario se ha desconectado");
+                } else if (opcode == 0x03) {
+                    /* Aviso de archivo a un usuario inexistente o no conectado */
+                    send_error(src_socket, "El usuario destinatario no existe o no está conectado");
                 } else {
                     /* Si es un simple chat privado... */
                     send_error(src_socket, "Usuario no existe");
