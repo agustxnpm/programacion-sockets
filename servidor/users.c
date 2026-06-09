@@ -83,6 +83,20 @@ int get_socket_by_name(const char* name) {
     return -1; /* Devolvemos -1 indicando "No encontrado" */
 }
 
+int get_name_by_socket(int socket_fd, char* out_name) {
+    pthread_mutex_lock(&users_mutex);
+    for (int i = 0; i < MAX_USERS; i++) {
+        if (users[i].is_active && users[i].socket_fd == socket_fd) {
+            strncpy(out_name, users[i].name, MAX_USERNAME_LEN);
+            out_name[MAX_USERNAME_LEN] = '\0';
+            pthread_mutex_unlock(&users_mutex);
+            return 1;
+        }
+    }
+    pthread_mutex_unlock(&users_mutex);
+    return 0;
+}
+
 /* Función para recopilar los IDs de TODOS los usuarios conectados (para enviar mensajes a todos) */
 void get_all_active_sockets(int* dest_fds, int* count) {
     pthread_mutex_lock(&users_mutex); /* Ponemos el candado */
@@ -93,4 +107,18 @@ void get_all_active_sockets(int* dest_fds, int* count) {
         }
     }
     pthread_mutex_unlock(&users_mutex); /* Quitamos el candado */
+}
+
+/* Devuelve los nombres de todos los usuarios activos excepto el indicado por exclude_fd */
+void get_all_active_names_except(int exclude_fd, char dest_names[][MAX_USERNAME_LEN + 1], int* count) {
+    pthread_mutex_lock(&users_mutex);
+    *count = 0;
+    for (int i = 0; i < MAX_USERS; i++) {
+        if (users[i].is_active && users[i].socket_fd != exclude_fd) {
+            strncpy(dest_names[(*count)], users[i].name, MAX_USERNAME_LEN);
+            dest_names[(*count)][MAX_USERNAME_LEN] = '\0';
+            (*count)++;
+        }
+    }
+    pthread_mutex_unlock(&users_mutex);
 }

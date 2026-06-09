@@ -51,6 +51,13 @@ void remove_user(int socket_fd);
 int get_socket_by_name(const char* name);
 
 /*
+ * Busca el nombre de usuario asociado a un socket descriptor.
+ * Copia el resultado en out_name (capacidad >= MAX_USERNAME_LEN+1).
+ * Retorna 1 si lo encuentra, 0 en caso contrario.
+ */
+int get_name_by_socket(int socket_fd, char* out_name);
+
+/*
  * Llena el array 'dest_fds' con los file descriptors de todos los usuarios conectados.
  * Guarda la cantidad total de usuarios activos en '*count'.
  * Adquiere el mutex internamente durante la copia.
@@ -62,5 +69,12 @@ int get_socket_by_name(const char* name);
  * para el número máximo de clientes simultáneos definido en la implementación.
  */
 void get_all_active_sockets(int* dest_fds, int* count);
+
+/*
+ * Llena 'dest_names' con los nombres de todos los usuarios activos EXCEPTO el
+ * que tiene el socket 'exclude_fd'. Cada nombre ocupa MAX_USERNAME_LEN+1 bytes.
+ * Guarda la cantidad en '*count'.
+ */
+void get_all_active_names_except(int exclude_fd, char dest_names[][MAX_USERNAME_LEN + 1], int* count);
 
 #endif /* USERS_H */
