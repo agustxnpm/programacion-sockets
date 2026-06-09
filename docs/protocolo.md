@@ -30,8 +30,8 @@ El primer byte del payload del `0x07` es el **Sub-Código de Tipo**. El servidor
 
 | Sub-Código | Nombre | Payload Completo | Descripción |
 |---|---|---|---|
-| `0x01` | ACK de Fragmento de Archivo | `[0x01]` (1 byte) | Confirma la recepción de un chunk. Lo envía el receptor luego de escribir el fragmento en disco. |
-| `0x02` | ACK de Consentimiento de Archivo | `[0x02, 0x01]` (aceptar) ó `[0x02, 0x00]` (rechazar) (2 bytes) | Respuesta del destinatario al Aviso de Archivo (`0x03`). |
+| `0x01` | ACK de Fragmento de Archivo | `[0x01][Emisor(20)]` (21 bytes) | Confirma la recepción de un chunk e identifica explícitamente al emisor para que el servidor enrute ACKs concurrentes sin ambigüedad. |
+| `0x02` | ACK de Consentimiento de Archivo | `[0x02][0x01/0x00][Emisor(20)]` (22 bytes) | Respuesta del destinatario al Aviso de Archivo (`0x03`), incluyendo el emisor al que aplica la decisión. |
 | `0x03` | ACK de Login Exitoso | `[0x03]` (1 byte) | Confirmación del servidor al cliente de que su Login fue aceptado. **Reemplaza el antiguo `0x08`**. |
 
 ### Acciones para enviar archivos
@@ -39,8 +39,8 @@ Para que la red no colapse, los archivos grandes no se mandan de golpe, se manda
 
 | Número de operación (OpCode) | ¿Qué significa? | ¿Qué viene en el contenido? (Payload) |
 |---|---|---|
-| 3 (0x03) | Aviso de archivo | Destinatario (20 lugares) + tamaño total del archivo (8 lugares) + nombre del archivo (ej. "foto.png"). |
-| 4 (0x04) | Fragmento de archivo | Destinatario (20 lugares) + Los bytes del archivo (Máximo 4096 bytes por envío). |
+| 3 (0x03) | Aviso de archivo | **Emisor -> Servidor:** Destinatario (20) + tamaño (8) + nombre. **Servidor -> Receptor:** Emisor (20) + tamaño (8) + nombre. |
+| 4 (0x04) | Fragmento de archivo | **Emisor -> Servidor:** Destinatario (20) + bytes. **Servidor -> Receptor:** Emisor (20) + bytes (máx. 4096). |
 
 ## 3. ¿Cómo enviamos un archivo sin romper nada?
 Usamos un sistema de "enviar y esperar" (Stop-and-Wait) con un *handshake* de consentimiento previo.
@@ -58,19 +58,19 @@ Enviar el tamaño total en el aviso inicial (`0x03`) cumple dos roles vitales:
 El protocolo para transferir un archivo tiene los siguientes cinco pasos:
 
 1. **Aviso y validación de tamaño:** Cliente A envía la operación `0x03` al Servidor con el nombre del destinatario, el tamaño total y el nombre del archivo. El Servidor primero lee este tamaño; **si supera el valor máximo permitido (ej. 100 MB), rechaza la petición** devolviendo inmediatamente un error `0x05` a A. Si el tamaño es válido, el Servidor lo rutea al Cliente B. *(Nota: El cliente también debe implementar ciertos mecanismos relacionados a este límite de capacidad antes de enviar, pero sus detalles se omiten en esta especificación).*
-2. **Respuesta del receptor:** Cliente B decide si acepta la transferencia y responde con la operación `0x07`, sub-código `0x02` (ACK de Consentimiento): payload `[0x02, 0x01]` si acepta o `[0x02, 0x00]` si rechaza. El Servidor rutea ese ACK hacia el Cliente A.
+2. **Respuesta del receptor:** Cliente B decide si acepta la transferencia y responde con `0x07/0x02`: payload `[0x02, 0x01/0x00, Emisor(20)]`.
 3. **Inicio de la transferencia (solo si hubo aceptación):** Si A recibió el ACK de Consentimiento con segundo byte `0x01`, envía la operación `0x04` con los primeros 4096 bytes del archivo. Si el segundo byte es `0x00`, cancela la operación.
 4. **Pausa obligatoria:** Cliente A se detiene. No envía ningún fragmento adicional hasta recibir confirmación.
-5. **ACK de fragmento y continuación:** Cliente B recibe el fragmento, lo escribe en disco y responde con la operación `0x07`, sub-código `0x01` (ACK de Fragmento): payload `[0x01]`. El Servidor rutea ese ACK hacia A. Al recibirlo, A envía el siguiente fragmento. Los pasos 3 a 5 se repiten hasta completar el archivo.
+5. **ACK de fragmento y continuación:** Cliente B recibe el fragmento, lo escribe en disco y responde con `0x07/0x01`: payload `[0x01, Emisor(20)]`. El servidor rutea ese ACK al emisor correcto. Los pasos 3 a 5 se repiten hasta completar el archivo.
 
 ### 3.1 Nota técnica para Servidores: Rastreo de Emisores
-Dado que el OpCode `0x07` (ACK Polimórfico) para archivos (`0x01` y `0x02`) no incluye el nombre del destinatario original en su payload (solo ocupa 1 o 2 bytes), el servidor requiere un mecanismo interno de **rastreo de emisores**.
+El servidor usa un esquema de **enrutado dirigido por emisor**:
 
-1. **Registro:** Cuando el servidor rutea un aviso (`0x03`) o un fragmento (`0x04`) del Cliente A hacia el Cliente B, debe guardar en una estructura interna (ej. un mapa o arreglo) que "B está recibiendo información de A".
-2. **Enrutamiento del ACK:** Cuando el Cliente B responde con un `0x07` asociado a un archivo, el servidor busca en su registro quién le estaba enviando el archivo a B (en este caso, A) y le reenvía el paquete.
+1. Al reenviar `0x03/0x04` al receptor, reescribe el campo inicial de 20 bytes con el nombre del emisor.
+2. El receptor responde ACKs (`0x07/0x02` y `0x07/0x01`) incluyendo ese emisor en el payload.
+3. El servidor extrae dicho emisor y reenvía el ACK al socket correcto.
 
-**Limitación del Protocolo (Transferencias Simultáneas):**
-Debido a que este rastreo asocia a un receptor con un único emisor activo a la vez en la memoria del servidor, **este protocolo no soporta múltiples transferencias de archivos simultáneas dirigidas exactamente al mismo destinatario**. Si un Cliente C intenta enviarle un archivo a B mientras A ya le está enviando uno, el servidor sobrescribirá el registro y los ACKs de B se rutearán incorrectamente. Para los alcances técnicos de este Trabajo Práctico, esta limitación estructural es conocida y aceptada.
+Con este diseño, el sistema **sí soporta transferencias simultáneas al mismo destinatario** (múltiples emisores -> un receptor).
 
 ## 4. Ejemplos reales (paso a paso)
 Para que quede claro cómo viajan los números por el cable de red.
@@ -150,20 +150,19 @@ Si el socket no recibe ningún dato durante **10 segundos consecutivos**, la pr�
 2. Eliminar al usuario de la lista activa: `remove_user(client_fd)`.
 3. Finalizar el hilo.
 
-### 5.4 Timeout en el Cliente Python: Espera de ACK Lógico (10 segundos)
+### 5.4 Timeout en el Cliente Python: Espera de ACK Lógico (30 segundos)
 
-El hilo de envío de archivos del Cliente Python debe aplicar un timeout al bloquearse esperando el `0x07` de confirmación. Si el emisor pasa más de **10 segundos** sin recibir el ACK de la aplicación destino, debe abortar la transferencia:
+El hilo de envío de archivos del Cliente Python aplica timeout al bloquearse esperando el `0x07` de confirmación. Si el emisor pasa más de **30 segundos** sin recibir ACK lógico, aborta la transferencia:
 
 ```python
-sock.settimeout(10.0)
-try:
-    ack_header = recv_all(sock, 5)
-    # Interpretar sub-código del ACK (0x01 o 0x02)
-except socket.timeout:
-    abort_transfer()
-    notify_ui("Transferencia abortada: timeout esperando confirmación del destinatario.")
-finally:
-    sock.settimeout(None)  # Restaurar modo bloqueante
+CONSENT_TIMEOUT_SEC = 30
+CHUNK_ACK_TIMEOUT_SEC = 30
+
+if not consent_event.wait(timeout=CONSENT_TIMEOUT_SEC):
+  abort_transfer()
+
+if not chunk_ack_event.wait(timeout=CHUNK_ACK_TIMEOUT_SEC):
+  abort_transfer()
 ```
 
 ### 5.5 Flujo de Error en Tránsito: Cierre de Circuito (Circuit Breaker)

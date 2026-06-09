@@ -31,7 +31,7 @@ A continuación se detalla el mapeo de códigos y la estructura de sus respectiv
 | 0x04   | Chunk Archivo | [Destinatario (20 bytes)] [Bytes del Chunk (máx. 4096)]        |
 | 0x05   | Error         | [Código (1 byte)] [Mensaje (String dinámico)]                   |
 | 0x06   | Difusión      | [Mensaje (String dinámico)]                                     |
-| 0x07   | ACK Polimórfico | [Sub-Código (1 byte)] + [Datos del subtipo]: `0x01` = ACK de Fragmento (1 byte total); `0x02` + `0x01`/`0x00` = ACK de Consentimiento (aceptar/rechazar); `0x03` = ACK de Login Exitoso. Reemplaza al antiguo `0x08`. |
+| 0x07   | ACK Polimórfico | [Sub-Código (1 byte)] + [Datos del subtipo]: `0x01` = ACK de Fragmento + Emisor(20); `0x02` + `0x01`/`0x00` + Emisor(20) = ACK de Consentimiento; `0x03` = ACK de Login Exitoso. Reemplaza al antiguo `0x08`. |
 
 ### Estructura de Archivos Recomendada (Servidor C)
 
@@ -105,14 +105,18 @@ Este módulo interpreta las reglas de negocio y coordina la distribución de la 
   - `int add_user(const char* name, int socket_fd);`: Agrega usuario. Retorna `1` (éxito) o `0` (nombre duplicado).
   - `void remove_user(int socket_fd);`: Elimina al usuario de la lista y cierra el socket limpiamente.
   - `int get_socket_by_name(const char* name);`: Busca el descriptor del socket. Retorna FD o `-1` (no encontrado).
+  - `int get_name_by_socket(int socket_fd, char* out_name);`: Resuelve el nombre de usuario desde su FD.
+  - `void get_all_active_names_except(int exclude_fd, char dest_names[][MAX_USERNAME_LEN + 1], int* count);`: Obtiene nombres activos para notificar al recién conectado.
 
 ### Tarea 3.2: Enrutador de Mensajes (Switch-Case Principal)
 
 - **Justificación:** Núcleo lógico que decide el flujo según el OpCode recibido.
 - **Función de Entrada:** `void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t length);`
 - **Comportamientos Clave:**
-  - **Login (`0x01`):** Invoca `add_user`. Si tiene éxito, envía `0x07` con sub-código `0x03` (ACK de Login Exitoso, payload de 1 byte: `[0x03]`) directamente al `src_socket`; inmediatamente después, itera sobre todos los demás descriptores activos enviando un `0x06` (Difusión) notificando el ingreso. Si el nombre está duplicado, envía `0x05` y cierra la conexión.
-  - **Mensajería/Archivos:** Validación de destinatario; envío de error (`0x05`) si el usuario no existe. **Regla especial para `0x03` (Inicio Archivo):** Antes de rutar, el servidor debe extraer el tamaño total del archivo del payload. Si este valor excede el límite máximo permitido (por ejemplo, 100 MB), se debe abortar el enrutamiento y devolver un error `0x05` al emisor indicando que el archivo es demasiado grande.
+  - **Login (`0x01`):** Invoca `add_user`. Si tiene éxito, envía `0x07/0x03` al origen, difunde el ingreso al resto y además informa al nuevo usuario quiénes ya estaban conectados (serie de `0x06`). Si el nombre está duplicado, envía `0x05` y cierra la conexión.
+  - **Mensajería/Archivos:** Validación de destinatario; envío de error (`0x05`) si el usuario no existe. **Regla especial para `0x03` (Inicio Archivo):** extraer tamaño total del payload; si excede 100 MB, abortar y responder `0x05` al emisor.
+  - **Transferencias Concurrentes:** Al reenviar `0x03/0x04`, el servidor sustituye el campo inicial de 20 bytes por el nombre del emisor; los ACKs de archivo incluyen ese emisor y se enrutan de forma determinística incluso con múltiples emisores al mismo receptor.
+  - **Concurrencia de escritura:** El servidor serializa envíos por `fd` destino para evitar intercalado de bytes cuando varios hilos escriben al mismo socket.
   - **Difusión:** Iteración sobre descriptores activos (excluyendo origen) bajo bloqueo de lista.
 - **Clarificación:** Si `get_socket_by_name` retorna `-1`, la función `route_message` debe invocar inmediatamente a `write_all` hacia el `src_socket` enviando el OpCode `0x05` antes de finalizar su ejecución.
 
@@ -136,9 +140,9 @@ Módulo de interacción con el usuario, desarrollado de forma aislada respetando
 - **Justificación:** Control de congestión del buffer TCP e implementación del *handshake* de consentimiento para no saturar el sistema de archivos del receptor.
 - **Lógica (flujo Stop-and-Wait con handshake):**
   1. Enviar `0x03` (Aviso) con el nombre del destinatario, el tamaño total y el nombre del archivo. Bloquear la interfaz de envío esperando respuesta. *(Nota: El cliente también debe implementar internamente una consideración sobre el límite de tamaño máximo antes del envío, sin entrar en más detalles aquí).*
-  2. Aguardar el `0x07/0x02` (ACK de Consentimiento) del receptor, ruteado por el servidor. Si el segundo byte del payload es `0x00` (rechazo), abortar la operación e informar al usuario. **Timeout:** si no se recibe respuesta en 10 segundos, abortar.
+  2. Aguardar el `0x07/0x02` (ACK de Consentimiento) del receptor, incluyendo emisor en payload. Si el segundo byte es `0x00` (rechazo), abortar la operación e informar al usuario. **Timeout:** 30 segundos.
   3. Si el segundo byte es `0x01` (aceptación), leer los primeros 4096 bytes del archivo y enviar `0x04`.
-  4. Aguardar el `0x07/0x01` (ACK de Fragmento). No enviar ningún byte adicional hasta recibirlo. **Timeout:** si el ACK no llega en 10 segundos, abortar la transferencia.
+  4. Aguardar el `0x07/0x01` (ACK de Fragmento, con emisor). No enviar ningún byte adicional hasta recibirlo. **Timeout:** 30 segundos.
   5. Repetir los pasos 3 y 4 hasta que todos los fragmentos hayan sido enviados y confirmados.
 
 ---
@@ -171,19 +175,17 @@ setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 ### Tarea T-FT2: Timeout en el Cliente Python — ACK Lógico de Transferencia
 
 - **Módulo:** Hilo de envío de archivos (`Tarea 4.3`).
-- **Primitiva:** `socket.settimeout(10.0)` aplicada antes de cada `recv()` bloqueante que espera un `0x07` (ACK de Consentimiento `0x07/0x02` o ACK de Fragmento `0x07/0x01`).
+- **Primitiva:** uso de `threading.Event().wait(timeout=30)` para esperar cada ACK lógico de transferencia (`0x07/0x02` y `0x07/0x01`).
 - **Firma lógica requerida:**
 
 ```python
-sock.settimeout(10.0)
-try:
-    ack_header = recv_all(sock, 5)
-    # Interpretar sub-código 0x01 o 0x02
-except socket.timeout:
-    abort_transfer()
-    notify_ui("Transferencia abortada: timeout esperando ACK del destinatario.")
-finally:
-    sock.settimeout(None)  # Restaurar modo bloqueante
+if not consent_event.wait(timeout=30):
+  abort_transfer()
+  notify_ui("Timeout esperando consentimiento del destinatario.")
+
+if not chunk_ack_event.wait(timeout=30):
+  abort_transfer()
+  notify_ui("Timeout esperando ACK de fragmento.")
 ```
 
 ### Tarea T-FT3: Flujo de Error en Tránsito — Circuit Breaker
