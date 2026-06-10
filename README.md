@@ -17,7 +17,7 @@ sudo apt install gcc build-essential python3 python3-pip python3-tk -y
 
 # Instalar las dependencias Python del cliente
 pip install -r requirements.txt --break-system-packages
-
+ 
 # Instalar el icono de adjunto
 apt install fonts-noto-color-emoji
 ```
