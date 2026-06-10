@@ -27,7 +27,7 @@ from views.login_view import LoginView
 from views.chat_view import ChatView
 from views.consent_dialog import FileConsentDialog
 
-HOST         = "127.0.0.1"
+DEFAULT_HOST = "127.0.0.1"
 PORT         = 9100
 DOWNLOAD_DIR = Path.home() / "Descargas"
 
@@ -45,6 +45,7 @@ class ChatApp:
         self._root.minsize(620, 440)
 
         self._username  = ""
+        self._host = DEFAULT_HOST
         self._file_ctrl: FileTransferController | None = None
         self._file_recvs: dict[str, FileReceiver] = {}
 
@@ -79,10 +80,11 @@ class ChatApp:
 
     # ── Acciones del usuario ──────────────────────────────────────────────
 
-    def _do_login(self, name: str):
+    def _do_login(self, name: str, host: str):
         self._username = name
+        self._host = host
         try:
-            self._net.connect(HOST, PORT)
+            self._net.connect(self._host, PORT)
             self._net.send(protocol.build_login(name))
         except OSError as e:
             self._login_view.set_connecting(False)
