@@ -59,4 +59,12 @@ void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t
  */
 void handle_disconnect(int client_fd);
 
+/*
+ * Cancela la transferencia activa asociada al FD 'fd' (si existe) y notifica
+ * al peer correspondiente con un mensaje de error de protocolo (0x05).
+ * Debe llamarse desde network.c ANTES de handle_disconnect() al detectar
+ * desconexión, para que el socket del peer todavía esté abierto al enviar.
+ */
+void cancel_active_transfer(int fd);
+
 #endif /* ROUTER_H */

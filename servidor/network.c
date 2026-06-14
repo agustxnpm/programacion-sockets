@@ -203,7 +203,8 @@ void* client_handler(void* arg) {
     }
 
     /* ── Limpieza al salir del ciclo ──────────────────────────────────── */
-    handle_disconnect(client_fd);  /* Notifica desconexión, cierra socket y elimina de la lista */
+    cancel_active_transfer(client_fd);   /* Notifica al peer si hay transferencia activa */
+    handle_disconnect(client_fd);        /* Difunde desconexión, cierra socket y elimina de la lista */
 
     return NULL;
 }

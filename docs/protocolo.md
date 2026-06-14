@@ -185,7 +185,7 @@ if not chunk_ack_event.wait(timeout=CHUNK_ACK_TIMEOUT_SEC):
 2. El servidor, en `route_message`, invoca `get_socket_by_name(nombre_b)` y obtiene `-1`.
 3. En lugar de descartar el fragmento silenciosamente, el servidor **frena el enrutamiento** y responde a A con el OpCode `0x05` (Error) y el texto exacto:
 
-   > *"Transferencia abortada: El destinatario se ha desconectado"*
+   > *"Transferencia abortada: el destinatario no está conectado."*
 
 4. El hilo de envío de A recibe el `0x05`, aborta inmediatamente la transferencia y notifica al usuario.
 
@@ -204,3 +204,46 @@ El **Heartbeat** es un mecanismo complementario al `SO_RCVTIMEO` del servidor. S
 - Pero el hecho de recibir cualquier dato resetea el temporizador interno del `SO_RCVTIMEO`, por lo que el servidor nunca expira la conexión de un cliente que envía heartbeats.
 
 **¿Por qué 8 segundos y no 10?** El intervalo de 8 s es deliberadamente menor al timeout del servidor (10 s) para garantizar que al menos un heartbeat llegue antes del vencimiento, incluso ante variaciones de latencia.
+
+### 5.7 Tabla de Transferencias Activas y Cancelación Inversa
+
+El escenario anterior cubre el caso en que el **receptor** se desconecta después de que el emisor ya empezó a enviar chunks. Sin embargo, el caso inverso —el **emisor** se desconecta a mitad de transferencia— no quedaba cubierto por el Circuit Breaker, ya que el servidor cerraba el socket del emisor sin notificar al receptor, dejándolo bloqueado indefinidamente esperando chunks que nunca llegarían.
+
+**Solución: tabla de transferencias activas en el servidor.**
+
+El servidor (`router.c`) mantiene dos arreglos estáticos protegidos por mutex:
+
+- `transfer_to_recv[sender_fd]` → fd del receptor asociado a ese emisor.
+- `transfer_to_send[receiver_fd]` → fd del emisor asociado a ese receptor.
+
+**Ciclo de vida de una entrada:**
+
+| Evento | Operación en la tabla |
+|---|---|
+| Servidor reenvía `0x03` al receptor | `register_transfer(sender_fd, receiver_fd)` |
+| Receptor responde `0x07/0x02/0x00` (rechazo) | `clear_transfer(sender_fd, receiver_fd)` |
+| Archivo completo (emisor recibe último ACK) | `clear_transfer(sender_fd, receiver_fd)` |
+| Cualquiera de los dos se desconecta | `cancel_active_transfer(fd)` — limpia tabla y notifica al peer |
+
+**`cancel_active_transfer(fd)`** debe llamarse desde `network.c` **antes** de `handle_disconnect(fd)`, para que el socket del peer todavía esté abierto al momento de escribir el `0x05`:
+
+```c
+// network.c — al salir del ciclo client_handler:
+cancel_active_transfer(client_fd);   // notifica al peer si hay transferencia activa
+handle_disconnect(client_fd);        // difunde desconexión, cierra socket y elimina de la lista
+```
+
+**Mensaje enviado al peer:**
+
+- Si quien se desconecta es el **emisor**:
+  > *"Transferencia cancelada: el emisor se ha desconectado."*
+
+- Si quien se desconecta es el **receptor**:
+  > *"Transferencia cancelada: el receptor se ha desconectado."*
+
+**Comportamiento del cliente receptor al recibir `0x05` durante una transferencia:**
+El texto del error contiene `"Transferencia cancelada"`. Al detectarlo, el cliente cancela la recepción activa (cierra y elimina el archivo parcial), oculta la barra de progreso y muestra el mensaje de error en el chat.
+
+### 5.8 Timeout de Consentimiento en el Receptor
+
+Cuando el receptor recibe un aviso de archivo (`0x03`) se le muestra un diálogo modal. Si el usuario no responde en **30 segundos**, el diálogo se cierra automáticamente y el cliente envía `0x07/0x02/0x00` (rechazo) al servidor, liberando el estado de espera tanto en el receptor como en el emisor (que recibirá el ACK de rechazo).

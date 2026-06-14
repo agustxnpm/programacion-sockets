@@ -22,7 +22,7 @@ from pathlib import Path
 
 from network import NetworkClient
 import protocol
-from file_transfer import FileTransferController, FileReceiver
+from file_transfer import FileTransferController, FileReceiver, validate_filename
 from views.login_view import LoginView
 from views.chat_view import ChatView
 from views.consent_dialog import FileConsentDialog
@@ -63,6 +63,8 @@ class ChatApp:
             on_send_private   = self._send_private,
             on_send_broadcast = self._send_broadcast,
             on_send_file      = self._start_file_send,
+            on_cancel_send    = self._cancel_send,
+            on_cancel_recv    = self._cancel_recv,
         )
 
         self._show_login()
@@ -86,9 +88,13 @@ class ChatApp:
         try:
             self._net.connect(self._host, PORT)
             self._net.send(protocol.build_login(name))
-        except OSError as e:
+        except OSError:
             self._login_view.set_connecting(False)
-            self._login_view.set_status(f"Error de conexión: {e}", error=True)
+            self._login_view.set_status(
+                "No se pudo conectar al servidor. Verificá que el servidor esté activo "
+                "y que la dirección de red sea correcta.",
+                error=True
+            )
 
     def _send_private(self, dest: str, text: str):
         """Antepone el nombre del emisor para que el receptor lo muestre."""
@@ -104,7 +110,10 @@ class ChatApp:
 
     def _start_file_send(self, dest: str, filepath: str):
         path = Path(filepath)
-        self._chat_view.set_transfer_active(True, path.name)
+        self._chat_view.set_transfer_active(
+            True, path.name,
+            label_text="Esperando confirmación de transferencia de archivo..."
+        )
         self._file_ctrl = FileTransferController(
             net       = self._net,
             dest      = dest,
@@ -117,6 +126,24 @@ class ChatApp:
             },
         )
         self._file_ctrl.start()
+
+    def _cancel_send(self):
+        """Cancela el envío activo desde el botón ✕ de la barra de envío."""
+        if self._file_ctrl:
+            self._file_ctrl.abort()
+            self._file_ctrl = None
+        self._chat_view.set_transfer_active(False)
+        self._chat_view.show_system("Envío de archivo cancelado.")
+
+    def _cancel_recv(self):
+        """Cancela todas las recepciones activas desde el botón ✕ de la barra recv."""
+        if not self._file_recvs:
+            return
+        for recv in self._file_recvs.values():
+            recv.cancel()
+        self._file_recvs.clear()
+        self._chat_view.set_recv_active(False)
+        self._chat_view.show_system("Recepción de archivo cancelada.")
 
     # ── Router central de paquetes ────────────────────────────────────────
     # Siempre ejecutado en el hilo GUI (vía root.after en el constructor).
@@ -137,11 +164,17 @@ class ChatApp:
             self._handle_broadcast(payload)
 
         elif opcode == 0x05:
-            msg = payload[1:].decode('utf-8', errors='replace') if payload else "Error desconocido"
+            msg = payload[1:].decode('utf-8', errors='replace') if payload else "Error desconocido."
             if self._file_ctrl:
                 self._file_ctrl.abort()
                 self._chat_view.set_transfer_active(False)
                 self._file_ctrl = None
+            # Limpiar recepciones activas si el error indica cancelación de transferencia
+            if self._file_recvs and "Transferencia cancelada" in msg:
+                for recv in self._file_recvs.values():
+                    recv.cancel()
+                self._file_recvs.clear()
+                self._chat_view.set_recv_active(False)
             self._chat_view.show_error(msg)
 
         elif opcode == 0x03:
@@ -210,17 +243,23 @@ class ChatApp:
     def _handle_incoming_file_notice(self, payload: bytes):
         if len(payload) < protocol.MAX_USERNAME_LEN + 8:
             return
-        sender = protocol.parse_transfer_peer(payload)
+        sender   = protocol.parse_transfer_peer(payload)
         size, filename = protocol.parse_file_notice(payload)
+
+        # Validar nombre de archivo seguro antes de mostrar el diálogo
+        err = validate_filename(filename)
+        if err:
+            self._net.send(protocol.build_transfer_ack_consent(sender, False))
+            self._chat_view.show_error(f"Transferencia rechazada automáticamente: {err}")
+            return
 
         def on_accept():
             if sender in self._file_recvs:
                 self._net.send(protocol.build_transfer_ack_consent(sender, False))
                 self._chat_view.show_error(
-                    f"Transferencia: Ya hay una recepción activa desde '{sender}'."
+                    f"Transferencia: ya hay una recepción activa desde '{sender}'."
                 )
                 return
-
             self._net.send(protocol.build_transfer_ack_consent(sender, True))
             self._file_recvs[sender] = FileReceiver(filename, size, DOWNLOAD_DIR)
             if size >= 1024 * 1024:
@@ -230,12 +269,19 @@ class ChatApp:
             self._chat_view.show_system(
                 f"Recibiendo '{filename}' desde '{sender}' ({size_str})..."
             )
+            self._chat_view.set_recv_active(True, filename, sender)
 
         def on_reject():
             self._net.send(protocol.build_transfer_ack_consent(sender, False))
             self._chat_view.show_system(f"Archivo '{filename}' de '{sender}' rechazado.")
 
-        FileConsentDialog(self._root, filename, size, on_accept, on_reject)
+        def on_timeout():
+            self._net.send(protocol.build_transfer_ack_consent(sender, False))
+            self._chat_view.show_system(
+                f"Se agotó el tiempo de espera para el archivo de '{sender}'."
+            )
+
+        FileConsentDialog(self._root, filename, size, sender, on_accept, on_reject, on_timeout)
 
     def _handle_incoming_chunk(self, payload: bytes):
         if len(payload) < protocol.MAX_USERNAME_LEN:
@@ -250,23 +296,27 @@ class ChatApp:
 
         chunk_data = payload[protocol.MAX_USERNAME_LEN:]
         try:
-            file_recv.write_chunk(chunk_data)
+            pct = file_recv.write_chunk(chunk_data)
         except OSError as e:
             file_recv.close()
             del self._file_recvs[sender]
+            self._chat_view.set_recv_active(False)
             self._chat_view.show_error(
                 f"Transferencia: error al escribir fragmento de '{sender}': {e}"
             )
             return
 
+        self._chat_view.update_recv_progress(pct)
         self._net.send(protocol.build_transfer_ack_chunk(sender))
 
         if file_recv.is_complete:
             file_recv.close()
-            self._chat_view.show_system(
-                f"'{file_recv.filename}' guardado en '{DOWNLOAD_DIR}/'."
-            )
+            saved_name = file_recv.filename
             del self._file_recvs[sender]
+            self._chat_view.set_recv_active(False)
+            self._chat_view.show_system(
+                f"'{saved_name}' guardado en Descargas."
+            )
 
     # ── Callbacks de transferencia ────────────────────────────────────────
 
@@ -291,9 +341,11 @@ class ChatApp:
         if self._file_ctrl:
             self._file_ctrl.abort()
             self._file_ctrl = None
+        self._chat_view.set_transfer_active(False)
         for recv in self._file_recvs.values():
-            recv.close()
+            recv.cancel()
         self._file_recvs.clear()
+        self._chat_view.set_recv_active(False)
         self._chat_view.clear_users()
         self._login_view.reset()
         self._login_view.set_status("Desconectado del servidor.", error=True)

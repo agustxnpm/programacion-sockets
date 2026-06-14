@@ -4,6 +4,7 @@
 Este documento establece la hoja de ruta técnica para la implementación del sistema de chat y transferencia de archivos. Se divide en cinco fases críticas que deben ejecutarse de manera secuencial para asegurar la integridad de la arquitectura.
 
 **Fecha de Inicio:** 4 jun 2026  
+**Última actualización:** 13 jun 2026 — Mejoras post-testing (ver Fase 6)
 
 ---
 
@@ -254,3 +255,36 @@ case 0x04: {
 
 - **Procedimiento:** Abortar proceso del Cliente A (`SIGKILL`) durante una transferencia activa hacia B. Simultáneamente, el Cliente C debe enviar una difusión.
 - **Resultado Esperado:** El servidor captura el error de socket de A, libera recursos mediante `remove_user` y procesa la difusión de C sin bloqueos ni fallos de memoria (Segfaults).
+
+---
+
+## Fase 6: Mejoras Post-Testing (13 jun 2026)
+
+Esta fase consolida las correcciones y mejoras detectadas durante las pruebas funcionales de la aplicación.
+
+### 6.1 Correcciones en el cliente Python
+
+| Archivo | Cambio |
+|---|---|
+| `views/consent_dialog.py` | Muestra el nombre del emisor ("De: usuario"). Agrega cuenta regresiva de 30 s con autocierre y callback `on_timeout` diferenciado del rechazo manual. |
+| `file_transfer.py` | Nueva función `validate_filename()`: rechaza traversal de rutas (`../`, `..\`, `/`, `\`, `C:`) sin restringir extensiones. `FileReceiver.cancel()`: cierra el archivo y elimina el parcial del disco. |
+| `views/chat_view.py` | Botón **# General** fijo en el sidebar para difusión (reemplaza al botón propio del usuario). Barra de "Recibiendo archivo" independiente con porcentaje y botón ✕. Botón ✕ en la barra de envío. Métodos `set_recv_active` y `update_recv_progress`. |
+| `app.py` | Mensaje inicial "Esperando confirmación de transferencia de archivo...". Validación de nombre de archivo antes de mostrar el diálogo. Actualización de barra de recepción por chunk. Limpieza de recepciones activas al recibir `0x05` con "Transferencia cancelada". Mensaje de error de red sin exponer traza del SO. Métodos `_cancel_send` y `_cancel_recv` para los botones ✕. |
+
+### 6.2 Correcciones en el servidor C
+
+| Archivo | Cambio |
+|---|---|
+| `router.h` | Declara `void cancel_active_transfer(int fd)`. |
+| `router.c` | Tabla estática `transfer_to_recv[] / transfer_to_send[]` con mutex. `register_transfer`: registra la pareja emisor→receptor al rutear `0x03`. `clear_transfer`: libera entradas cuando el receptor rechaza el consentimiento (`0x07/0x02/0x00`). `cancel_active_transfer`: notifica al peer con `0x05` si hay transferencia activa al desconectarse un fd. Mensajes de error con puntuación correcta. |
+| `network.c` | Llama `cancel_active_transfer(client_fd)` **antes** de `remove_user(client_fd)` para garantizar que el socket del peer esté abierto al momento de enviar la notificación. |
+
+### 6.3 Bug resuelto: emisor se desconecta a mitad de transferencia
+
+**Síntoma:** Si el emisor cerraba su conexión durante una transferencia, el receptor quedaba bloqueado esperando chunks indefinidamente.
+
+**Causa raíz:** El servidor cerraba el socket del emisor (`remove_user`) sin notificar al receptor.
+
+**Solución:** La tabla de transferencias activas en `router.c` + `cancel_active_transfer` + la llamada previa en `network.c` garantizan que el receptor reciba el `0x05` antes de que el socket del emisor se cierre, permitiéndole limpiar estado y seguir operativo para futuras transferencias.
+
+Ver sección **5.6** de `docs/protocolo.md` para la especificación completa del mecanismo.

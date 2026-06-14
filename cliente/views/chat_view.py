@@ -25,17 +25,23 @@ from datetime import datetime
 
 
 class ChatView(ctk.CTkFrame):
-    def __init__(self, master, on_send_private, on_send_broadcast, on_send_file):
+    def __init__(self, master, on_send_private, on_send_broadcast, on_send_file,
+                 on_cancel_send=None, on_cancel_recv=None):
         """
         on_send_private(dest, text)  — mensaje privado.
         on_send_broadcast(text)      — difusión a todos.
         on_send_file(dest, filepath) — envío de archivo.
+        on_cancel_send()             — cancela el envío activo.
+        on_cancel_recv()             — cancela la recepción activa.
         """
         super().__init__(master, fg_color="transparent")
         self._on_send_private   = on_send_private
         self._on_send_broadcast = on_send_broadcast
         self._on_send_file      = on_send_file
+        self._on_cancel_send    = on_cancel_send or (lambda: None)
+        self._on_cancel_recv    = on_cancel_recv or (lambda: None)
         self._user_buttons: dict[str, ctk.CTkButton] = {}
+        self._recv_base_label   = ""
         self._build()
 
     # ── Construcción ──────────────────────────────────────────────────────
@@ -51,7 +57,7 @@ class ChatView(ctk.CTkFrame):
     def _build_sidebar(self):
         sidebar = ctk.CTkFrame(self, width=160, corner_radius=0)
         sidebar.grid(row=0, column=0, sticky="nsew")
-        sidebar.rowconfigure(1, weight=1)
+        sidebar.rowconfigure(2, weight=1)
         sidebar.columnconfigure(0, weight=1)
         sidebar.grid_propagate(False)
 
@@ -60,10 +66,21 @@ class ChatView(ctk.CTkFrame):
             font=ctk.CTkFont(size=11, weight="bold"), text_color="#666680"
         ).grid(row=0, column=0, padx=12, pady=(14, 6), sticky="w")
 
+        # Canal de difusión (reemplaza al botón propio del usuario)
+        ctk.CTkButton(
+            sidebar,
+            text="# General",
+            anchor="w", height=30,
+            fg_color="#2A2A3A", hover_color="#3A3A4A",
+            text_color="#7EB8F7",
+            font=ctk.CTkFont(size=12),
+            command=self._fill_broadcast,
+        ).grid(row=1, column=0, padx=4, pady=(0, 6), sticky="ew")
+
         self._users_frame = ctk.CTkScrollableFrame(
             sidebar, fg_color="transparent", corner_radius=0
         )
-        self._users_frame.grid(row=1, column=0, sticky="nsew")
+        self._users_frame.grid(row=2, column=0, sticky="nsew")
         self._users_frame.columnconfigure(0, weight=1)
 
     def _build_main(self):
@@ -99,7 +116,7 @@ class ChatView(ctk.CTkFrame):
         # Los colores se aplican en _append para garantizar que no sean pisados
         # por CTkTextbox al reinicializar su widget interno.
 
-        # — Barra de transferencia (oculta por defecto) ───────────────────
+        # — Barra de envío (oculta por defecto) ────────────────────────────
         self._transfer_frame = ctk.CTkFrame(main, height=34, corner_radius=0)
         self._transfer_frame.columnconfigure(1, weight=1)
         self._transfer_label = ctk.CTkLabel(
@@ -109,11 +126,35 @@ class ChatView(ctk.CTkFrame):
         self._transfer_label.grid(row=0, column=0, padx=(14, 8), sticky="w", pady=6)
         self._transfer_bar = ctk.CTkProgressBar(self._transfer_frame, height=10)
         self._transfer_bar.set(0)
-        self._transfer_bar.grid(row=0, column=1, padx=(0, 14), sticky="ew", pady=10)
+        self._transfer_bar.grid(row=0, column=1, padx=(0, 8), sticky="ew", pady=10)
+        ctk.CTkButton(
+            self._transfer_frame, text="✕", width=32, height=22,
+            fg_color="#C0392B", hover_color="#922B21",
+            font=ctk.CTkFont(size=11),
+            command=lambda: self._on_cancel_send(),
+        ).grid(row=0, column=2, padx=(0, 10), pady=6)
+
+        # — Barra de recepción (oculta por defecto) ───────────────────────
+        self._recv_frame = ctk.CTkFrame(main, height=34, corner_radius=0)
+        self._recv_frame.columnconfigure(1, weight=1)
+        self._recv_label = ctk.CTkLabel(
+            self._recv_frame, text="",
+            font=ctk.CTkFont(size=11), text_color="gray", anchor="w"
+        )
+        self._recv_label.grid(row=0, column=0, padx=(14, 8), sticky="w", pady=6)
+        self._recv_bar = ctk.CTkProgressBar(self._recv_frame, height=10)
+        self._recv_bar.set(0)
+        self._recv_bar.grid(row=0, column=1, padx=(0, 8), sticky="ew", pady=10)
+        ctk.CTkButton(
+            self._recv_frame, text="✕", width=32, height=22,
+            fg_color="#C0392B", hover_color="#922B21",
+            font=ctk.CTkFont(size=11),
+            command=lambda: self._on_cancel_recv(),
+        ).grid(row=0, column=2, padx=(0, 10), pady=6)
 
         # — Input ─────────────────────────────────────────────────────────
         input_frame = ctk.CTkFrame(main, height=62, corner_radius=0)
-        input_frame.grid(row=3, column=0, sticky="ew")
+        input_frame.grid(row=4, column=0, sticky="ew")
         input_frame.columnconfigure(0, weight=1)
 
         self._msg_entry = ctk.CTkEntry(
@@ -177,19 +218,21 @@ class ChatView(ctk.CTkFrame):
     # ── Sidebar: gestión de usuarios ─────────────────────────────────────
 
     def add_user(self, name: str, is_self: bool = False):
-        """Agrega un usuario al panel lateral. Idempotente."""
+        """Agrega un usuario al panel lateral. Idempotente.
+        El propio usuario (is_self=True) no se agrega: el botón General lo reemplaza.
+        """
+        if is_self:
+            return
         if name in self._user_buttons:
             return
-        display = f"(tú) {name}" if is_self else name
-        color   = "#82C882" if is_self else "#AAAACC"
         btn = ctk.CTkButton(
             self._users_frame,
-            text=f"* {display}",
+            text=f"* {name}",
             anchor="w", height=30,
             fg_color="transparent", hover_color="#2A2A3A",
-            text_color=color,
+            text_color="#AAAACC",
             font=ctk.CTkFont(size=12),
-            command=(lambda n=name: self._fill_private(n)) if not is_self else lambda: None,
+            command=lambda n=name: self._fill_private(n),
         )
         btn.grid(sticky="ew", padx=4, pady=2)
         self._user_buttons[name] = btn
@@ -203,6 +246,16 @@ class ChatView(ctk.CTkFrame):
         for btn in self._user_buttons.values():
             btn.destroy()
         self._user_buttons.clear()
+
+    def _fill_broadcast(self):
+        """Limpia cualquier @mention del input para volver al modo difusión (General)."""
+        current = self._msg_entry.get()
+        if current.startswith('@'):
+            parts = current.split(' ', 1)
+            rest  = parts[1] if len(parts) > 1 else ""
+            self._msg_entry.delete(0, 'end')
+            self._msg_entry.insert(0, rest.strip())
+        self._msg_entry.focus()
 
     def _fill_private(self, username: str):
         """Al hacer clic en un usuario, autocompleta '@usuario ' en el input."""
@@ -251,9 +304,11 @@ class ChatView(ctk.CTkFrame):
     def set_header(self, username: str):
         self._header_label.configure(text=f"Chat  ·  {username}")
 
-    def set_transfer_active(self, active: bool, filename: str = ""):
+    def set_transfer_active(self, active: bool, filename: str = "",
+                            label_text: str = ""):
         if active:
-            self._transfer_label.configure(text=f"Enviando: {filename}")
+            text = label_text if label_text else f"Enviando: {filename}"
+            self._transfer_label.configure(text=text)
             self._transfer_bar.set(0)
             self._transfer_frame.grid(row=2, column=0, sticky="ew")
             self._send_btn.configure(state="disabled")
@@ -266,6 +321,23 @@ class ChatView(ctk.CTkFrame):
     def update_transfer_progress(self, pct: float):
         self._transfer_bar.set(pct / 100)
         self._transfer_label.configure(text=f"Enviando: {pct:.0f}%")
+
+    def set_recv_active(self, active: bool, filename: str = "", sender: str = ""):
+        if active:
+            self._recv_base_label = (
+                f"Recibiendo: {filename}" + (f" (de {sender})" if sender else "")
+            )
+            self._recv_label.configure(text=self._recv_base_label)
+            self._recv_bar.set(0)
+            self._recv_frame.grid(row=3, column=0, sticky="ew")
+        else:
+            self._recv_frame.grid_forget()
+            self._recv_base_label = ""
+
+    def update_recv_progress(self, pct: float):
+        self._recv_bar.set(pct / 100)
+        base = self._recv_base_label or "Recibiendo"
+        self._recv_label.configure(text=f"{base}  {pct:.0f}%")
 
     # ── Interno ───────────────────────────────────────────────────────────
 

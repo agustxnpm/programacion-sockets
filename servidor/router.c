@@ -26,6 +26,85 @@ static void init_send_mutexes(void) {
     }
 }
 
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Tabla de transferencias activas.
+ * transfer_to_recv[sender_fd]   = receiver_fd  (-1 si no hay transferencia)
+ * transfer_to_send[receiver_fd] = sender_fd    (-1 si no hay transferencia)
+ * Protegida por transfer_mutex para acceso concurrente.
+ * ───────────────────────────────────────────────────────────────────────────── */
+static int transfer_to_recv[MAX_FDS];
+static int transfer_to_send[MAX_FDS];
+static pthread_mutex_t transfer_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_once_t  transfer_once  = PTHREAD_ONCE_INIT;
+
+static void init_transfer_table(void) {
+    for (int i = 0; i < MAX_FDS; i++) {
+        transfer_to_recv[i] = -1;
+        transfer_to_send[i] = -1;
+    }
+}
+
+static void register_transfer(int sender_fd, int receiver_fd) {
+    pthread_once(&transfer_once, init_transfer_table);
+    if (sender_fd < 0 || sender_fd >= MAX_FDS) return;
+    if (receiver_fd < 0 || receiver_fd >= MAX_FDS) return;
+    pthread_mutex_lock(&transfer_mutex);
+    transfer_to_recv[sender_fd]   = receiver_fd;
+    transfer_to_send[receiver_fd] = sender_fd;
+    pthread_mutex_unlock(&transfer_mutex);
+}
+
+static void clear_transfer(int sender_fd, int receiver_fd) {
+    pthread_once(&transfer_once, init_transfer_table);
+    pthread_mutex_lock(&transfer_mutex);
+    if (sender_fd >= 0 && sender_fd < MAX_FDS)
+        transfer_to_recv[sender_fd] = -1;
+    if (receiver_fd >= 0 && receiver_fd < MAX_FDS)
+        transfer_to_send[receiver_fd] = -1;
+    pthread_mutex_unlock(&transfer_mutex);
+}
+
+/* Declaración anticipada — definición completa más abajo, antes de route_message */
+static void send_error(int dest_socket, const char* msg);
+
+/* Notifica al peer si fd tenía una transferencia activa y la limpia. */
+void cancel_active_transfer(int fd) {
+    pthread_once(&transfer_once, init_transfer_table);
+    pthread_mutex_lock(&transfer_mutex);
+
+    int peer_fd     = -1;
+    int i_am_sender = 0;
+
+    if (fd >= 0 && fd < MAX_FDS) {
+        if (transfer_to_recv[fd] != -1) {
+            /* fd es el emisor */
+            peer_fd              = transfer_to_recv[fd];
+            i_am_sender          = 1;
+            transfer_to_recv[fd] = -1;
+            if (peer_fd >= 0 && peer_fd < MAX_FDS)
+                transfer_to_send[peer_fd] = -1;
+        } else if (transfer_to_send[fd] != -1) {
+            /* fd es el receptor */
+            peer_fd              = transfer_to_send[fd];
+            i_am_sender          = 0;
+            transfer_to_send[fd] = -1;
+            if (peer_fd >= 0 && peer_fd < MAX_FDS)
+                transfer_to_recv[peer_fd] = -1;
+        }
+    }
+    pthread_mutex_unlock(&transfer_mutex);
+
+    if (peer_fd == -1) return;
+
+    if (i_am_sender) {
+        send_error(peer_fd,
+            "Transferencia cancelada: el emisor se ha desconectado.");
+    } else {
+        send_error(peer_fd,
+            "Transferencia cancelada: el receptor se ha desconectado.");
+    }
+}
+
 static int send_packet_locked(int dest_socket, uint8_t opcode, const void* payload, uint32_t length) {
     uint32_t len_net = htonl(length);
 
@@ -171,15 +250,12 @@ void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t
             /* Busca la conexión asociada a ese nombre */
             int dest_fd = get_socket_by_name(dest_name);
             if (dest_fd == -1) { /* Si no lo encontró, está desconectado o no existe */
-                if (opcode == 0x04) {
-                    /* Circuit Breaker: destinatario se desconectó durante una transferencia activa */
-                    send_error(src_socket, "Transferencia abortada: El destinatario se ha desconectado");
-                } else if (opcode == 0x03) {
-                    /* Aviso de archivo a un usuario inexistente o no conectado */
-                    send_error(src_socket, "El usuario destinatario no existe o no está conectado");
+                if (opcode == 0x04 || opcode == 0x03) {
+                    /* Si es transferencia de archivo, usamos el error oficial documentado */
+                    send_error(src_socket, "Transferencia abortada: el destinatario no está conectado.");
                 } else {
                     /* Si es un simple chat privado... */
-                    send_error(src_socket, "Usuario no existe");
+                    send_error(src_socket, "El usuario no existe o no está conectado.");
                 }
                 return; /* No hacemos nada más y salimos de la función */
             }
@@ -208,6 +284,11 @@ void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t
                 (void)len_net;
                 send_packet_locked(dest_fd, opcode, forward_payload, length);
                 free(forward_payload);
+
+                /* Registrar transferencia activa al enviar el aviso inicial (0x03) */
+                if (opcode == 0x03) {
+                    register_transfer(src_socket, dest_fd);
+                }
                 break;
             }
 
@@ -256,6 +337,17 @@ void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t
 
                 if (sender_fd != -1) {
                     send_packet_locked(sender_fd, opcode, payload, length);
+                }
+
+                /* Si es rechazo de consentimiento (0x07/0x02/0x00): limpiar transferencia */
+                if (subcode == 0x02 && length >= 2) {
+                    uint8_t flag = ((uint8_t*)payload)[1];
+                    if (flag == 0x00) {
+                        clear_transfer(
+                            (sender_fd >= 0 && sender_fd < MAX_FDS) ? sender_fd : -1,
+                            src_socket
+                        );
+                    }
                 }
             }
             break;

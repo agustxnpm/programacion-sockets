@@ -15,8 +15,28 @@ from typing import Callable
 import protocol
 
 
-CONSENT_TIMEOUT_SEC = 30
+CONSENT_TIMEOUT_SEC   = 30
 CHUNK_ACK_TIMEOUT_SEC = 30
+
+
+def validate_filename(name: str) -> str | None:
+    """
+    Valida que el nombre de archivo sea seguro: sin traversal de rutas ni
+    separadores de directorio. No restringe extensiones.
+
+    Retorna None si el nombre es válido, o un mensaje de error en caso contrario.
+    """
+    stripped = name.strip() if name else ""
+    if not stripped:
+        return "El nombre del archivo no puede estar vacío."
+    # Separadores y patrones de traversal
+    for bad in ('/', '\\', '\x00', '../', '..\\'):
+        if bad in stripped:
+            return "El nombre del archivo contiene separadores de ruta no permitidos."
+    # Ruta absoluta de Windows (ej. C:, D:)
+    if len(stripped) >= 2 and stripped[1] == ':':
+        return "El nombre del archivo no puede contener una ruta absoluta."
+    return None
 
 
 class FileTransferController:
@@ -162,6 +182,17 @@ class FileReceiver:
     @property
     def filename(self) -> str:
         return self._path.name
+
+    def cancel(self) -> None:
+        """Cancela la recepción: cierra el archivo y elimina el parcial del disco."""
+        try:
+            self._file.close()
+        except OSError:
+            pass
+        try:
+            self._path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def close(self) -> None:
         self._file.close()
