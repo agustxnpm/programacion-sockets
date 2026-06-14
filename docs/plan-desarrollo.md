@@ -28,7 +28,7 @@ A continuación se detalla el mapeo de códigos y la estructura de sus respectiv
 | 0x01   | Login         | [Nombre de Usuario (String dinámico)]                           |
 | 0x02   | Privado       | [Destinatario (20 bytes)] [Mensaje (String dinámico)]           |
 | 0x03   | Inicio Archivo| [Destinatario (20 bytes)] [Tamaño (8 bytes)] [Nombre (String)] |
-| 0x04   | Chunk Archivo | [Destinatario (20 bytes)] [Bytes del Chunk (máx. 4096)]        |
+| 0x04   | Chunk Archivo | [Destinatario (20 bytes)] [Bytes del Chunk (máx. 65536)]       |
 | 0x05   | Error         | [Código (1 byte)] [Mensaje (String dinámico)]                   |
 | 0x06   | Difusión      | [Mensaje (String dinámico)]                                     |
 | 0x07   | ACK Polimórfico | [Sub-Código (1 byte)] + [Datos del subtipo]: `0x01` = ACK de Fragmento + Emisor(20); `0x02` + `0x01`/`0x00` + Emisor(20) = ACK de Consentimiento; `0x03` = ACK de Login Exitoso. Reemplaza al antiguo `0x08`. |
@@ -145,7 +145,7 @@ Módulo de interacción con el usuario, desarrollado de forma aislada respetando
 - **Lógica (flujo Stop-and-Wait con handshake):**
   1. Enviar `0x03` (Aviso) con el nombre del destinatario, el tamaño total y el nombre del archivo. Bloquear la interfaz de envío esperando respuesta. *(Nota: El cliente también debe implementar internamente una consideración sobre el límite de tamaño máximo antes del envío, sin entrar en más detalles aquí).*
   2. Aguardar el `0x07/0x02` (ACK de Consentimiento) del receptor, incluyendo emisor en payload. Si el segundo byte es `0x00` (rechazo), abortar la operación e informar al usuario. **Timeout:** 30 segundos.
-  3. Si el segundo byte es `0x01` (aceptación), leer los primeros 4096 bytes del archivo y enviar `0x04`.
+  3. Si el segundo byte es `0x01` (aceptación), leer los primeros 65536 bytes del archivo y enviar `0x04`.
   4. Aguardar el `0x07/0x01` (ACK de Fragmento, con emisor). No enviar ningún byte adicional hasta recibirlo. **Timeout:** 30 segundos.
   5. Repetir los pasos 3 y 4 hasta que todos los fragmentos hayan sido enviados y confirmados.
 

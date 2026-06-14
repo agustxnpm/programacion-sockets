@@ -15,7 +15,7 @@ import customtkinter as ctk
 class LoginView(ctk.CTkFrame):
     def __init__(self, master, on_connect):
         """
-        on_connect(name: str) — callback llamado al pulsar Conectar.
+        on_connect(name: str, host: str) — callback llamado al pulsar Conectar.
         Se llama solo si el nombre es válido; la vista pasa a estado "conectando".
         """
         super().__init__(master, fg_color="transparent")
@@ -46,7 +46,16 @@ class LoginView(ctk.CTkFrame):
             width=260, height=44, font=ctk.CTkFont(size=14)
         )
         self._name_entry.grid(row=2, column=0, padx=40, pady=(0, 12))
+
+        self._ip_entry = ctk.CTkEntry(
+            card, placeholder_text="IP del servidor (ej: 192.168.1.10)",
+            width=260, height=44, font=ctk.CTkFont(size=14)
+        )
+        self._ip_entry.grid(row=3, column=0, padx=40, pady=(0, 12))
+        self._ip_entry.insert(0, "127.0.0.1")
+
         self._name_entry.bind('<Return>', lambda _: self._handle_connect())
+        self._ip_entry.bind('<Return>', lambda _: self._handle_connect())
         self._name_entry.focus()
 
         self._connect_btn = ctk.CTkButton(
@@ -54,26 +63,30 @@ class LoginView(ctk.CTkFrame):
             font=ctk.CTkFont(size=14, weight="bold"),
             command=self._handle_connect
         )
-        self._connect_btn.grid(row=3, column=0, padx=40, pady=(0, 12))
+        self._connect_btn.grid(row=4, column=0, padx=40, pady=(0, 12))
 
         self._status = ctk.CTkLabel(
             card, text="",
             font=ctk.CTkFont(size=12), text_color="gray"
         )
-        self._status.grid(row=4, column=0, pady=(0, 36), padx=50)
+        self._status.grid(row=5, column=0, pady=(0, 36), padx=50)
 
     # ── Handlers internos ─────────────────────────────────────────────────
 
     def _handle_connect(self):
         name = self._name_entry.get().strip()
+        host = self._ip_entry.get().strip()
         if not name:
             self.set_status("Ingresá un nombre de usuario.", error=True)
             return
         if len(name) > 20:
             self.set_status("El nombre no puede superar los 20 caracteres.", error=True)
             return
+        if not host:
+            self.set_status("Ingresá la IP del servidor.", error=True)
+            return
         self.set_connecting(True)
-        self._on_connect(name)
+        self._on_connect(name, host)
 
     # ── API pública ───────────────────────────────────────────────────────
 
@@ -82,6 +95,7 @@ class LoginView(ctk.CTkFrame):
         state = "disabled" if active else "normal"
         self._connect_btn.configure(state=state)
         self._name_entry.configure(state=state)
+        self._ip_entry.configure(state=state)
         if active:
             self.set_status("Conectando...")
 
@@ -94,6 +108,9 @@ class LoginView(ctk.CTkFrame):
     def reset(self):
         """Restaura la vista a su estado inicial (tras una desconexión)."""
         self._name_entry.configure(state="normal")
+        self._ip_entry.configure(state="normal")
         self._connect_btn.configure(state="normal")
         self._name_entry.delete(0, 'end')
+        self._ip_entry.delete(0, 'end')
+        self._ip_entry.insert(0, "127.0.0.1")
         self.set_status("")

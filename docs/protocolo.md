@@ -41,7 +41,7 @@ Para que la red no colapse, los archivos grandes no se mandan de golpe, se manda
 | Número de operación (OpCode) | ¿Qué significa? | ¿Qué viene en el contenido? (Payload) |
 |---|---|---|
 | 3 (0x03) | Aviso de archivo | **Emisor -> Servidor:** Destinatario (20) + tamaño (8) + nombre. **Servidor -> Receptor:** Emisor (20) + tamaño (8) + nombre. |
-| 4 (0x04) | Fragmento de archivo | **Emisor -> Servidor:** Destinatario (20) + bytes. **Servidor -> Receptor:** Emisor (20) + bytes (máx. 4096). |
+| 4 (0x04) | Fragmento de archivo | **Emisor -> Servidor:** Destinatario (20) + bytes. **Servidor -> Receptor:** Emisor (20) + bytes (máx. 65536). |
 
 ## 3. ¿Cómo enviamos un archivo sin romper nada?
 Usamos un sistema de "enviar y esperar" (Stop-and-Wait) con un *handshake* de consentimiento previo.
@@ -60,7 +60,7 @@ El protocolo para transferir un archivo tiene los siguientes cinco pasos:
 
 1. **Aviso y validación de tamaño:** Cliente A envía la operación `0x03` al Servidor con el nombre del destinatario, el tamaño total y el nombre del archivo. El Servidor primero lee este tamaño; **si supera el valor máximo permitido (ej. 100 MB), rechaza la petición** devolviendo inmediatamente un error `0x05` a A. Si el tamaño es válido, el Servidor lo rutea al Cliente B. *(Nota: El cliente también debe implementar ciertos mecanismos relacionados a este límite de capacidad antes de enviar, pero sus detalles se omiten en esta especificación).*
 2. **Respuesta del receptor:** Cliente B decide si acepta la transferencia y responde con `0x07/0x02`: payload `[0x02, 0x01/0x00, Emisor(20)]`.
-3. **Inicio de la transferencia (solo si hubo aceptación):** Si A recibió el ACK de Consentimiento con segundo byte `0x01`, envía la operación `0x04` con los primeros 4096 bytes del archivo. Si el segundo byte es `0x00`, cancela la operación.
+3. **Inicio de la transferencia (solo si hubo aceptación):** Si A recibió el ACK de Consentimiento con segundo byte `0x01`, envía la operación `0x04` con los primeros 65536 bytes del archivo. Si el segundo byte es `0x00`, cancela la operación.
 4. **Pausa obligatoria:** Cliente A se detiene. No envía ningún fragmento adicional hasta recibir confirmación.
 5. **ACK de fragmento y continuación:** Cliente B recibe el fragmento, lo escribe en disco y responde con `0x07/0x01`: payload `[0x01, Emisor(20)]`. El servidor rutea ese ACK al emisor correcto. Los pasos 3 a 5 se repiten hasta completar el archivo.
 

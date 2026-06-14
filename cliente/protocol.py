@@ -8,7 +8,7 @@ import struct
 
 HEADER_FORMAT = '!BI'
 HEADER_SIZE   = struct.calcsize(HEADER_FORMAT)   # 5 bytes
-MAX_CHUNK_SIZE    = 4096
+MAX_CHUNK_SIZE    = 64 * 1024
 MAX_FILE_SIZE     = 100 * 1024 * 1024            # 100 MB
 MAX_USERNAME_LEN  = 20
 
@@ -60,7 +60,7 @@ def build_file_notice(dest: str, size: int, filename: str) -> bytes:
 
 
 def build_file_chunk(dest: str, data: bytes) -> bytes:
-    """0x04 — Fragmento de archivo: payload = dest(20b) + bytes del chunk (máx 4096)."""
+    """0x04 — Fragmento de archivo: payload = dest(20b) + bytes del chunk (máx 64 KB)."""
     return build_packet(0x04, _pad_dest(dest) + data)
 
 
