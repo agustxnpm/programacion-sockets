@@ -217,7 +217,7 @@ if not chunk_ack_event.wait(timeout=30):
 case 0x03: {
     // Si el destinatario no existe en el momento del aviso inicial:
     if (dest_fd == -1) {
-        send_error(src_socket, "El usuario destinatario no existe o no está conectado");
+        send_error(src_socket, "El usuario destinatario no existe o no está conectado.");
         return;
     }
     // ... reenviar aviso normalmente
@@ -269,14 +269,15 @@ Esta fase consolida las correcciones y mejoras detectadas durante las pruebas fu
 | `views/consent_dialog.py` | Muestra el nombre del emisor ("De: usuario"). Agrega cuenta regresiva de 30 s con autocierre y callback `on_timeout` diferenciado del rechazo manual. |
 | `file_transfer.py` | Nueva función `validate_filename()`: rechaza traversal de rutas (`../`, `..\`, `/`, `\`, `C:`) sin restringir extensiones. `FileReceiver.cancel()`: cierra el archivo y elimina el parcial del disco. |
 | `views/chat_view.py` | Botón **# General** fijo en el sidebar para difusión (reemplaza al botón propio del usuario). Barra de "Recibiendo archivo" independiente con porcentaje y botón ✕. Botón ✕ en la barra de envío. Métodos `set_recv_active` y `update_recv_progress`. |
-| `app.py` | Mensaje inicial "Esperando confirmación de transferencia de archivo...". Validación de nombre de archivo antes de mostrar el diálogo. Actualización de barra de recepción por chunk. Limpieza de recepciones activas al recibir `0x05` con "Transferencia cancelada". Mensaje de error de red sin exponer traza del SO. Métodos `_cancel_send` y `_cancel_recv` para los botones ✕. |
+| `app.py` | Mensaje inicial "Esperando confirmación de transferencia de archivo...". Validación de nombre de archivo antes de mostrar el diálogo. Actualización de barra de recepción por chunk. Validación de tamaño límite de fragmento al recibir (64 KB). Limpieza de recepciones activas al recibir `0x05` con "Transferencia cancelada". Mensaje de error de red sin exponer traza del SO. Métodos `_cancel_send` y `_cancel_recv` para los botones ✕. |
+| `main.py` | Implementación de limpieza automática al cerrar la aplicación (`atexit`), eliminando recursivamente los archivos temporales de Python (`__pycache__`). |
 
 ### 6.2 Correcciones en el servidor C
 
 | Archivo | Cambio |
 |---|---|
 | `router.h` | Declara `void cancel_active_transfer(int fd)`. |
-| `router.c` | Tabla estática `transfer_to_recv[] / transfer_to_send[]` con mutex. `register_transfer`: registra la pareja emisor→receptor al rutear `0x03`. `clear_transfer`: libera entradas cuando el receptor rechaza el consentimiento (`0x07/0x02/0x00`). `cancel_active_transfer`: notifica al peer con `0x05` si hay transferencia activa al desconectarse un fd. Mensajes de error con puntuación correcta. |
+| `router.c` | Tabla estática `transfer_to_recv[] / transfer_to_send[]` con mutex. `register_transfer`: registra la pareja emisor→receptor al rutear `0x03`. `clear_transfer`: libera entradas cuando el receptor rechaza el consentimiento (`0x07/0x02/0x00`). `cancel_active_transfer`: notifica al peer con `0x05` si hay transferencia activa al desconectarse un fd. Validación de tamaño máximo de fragmento (<= 64 KB). Mensajes de error con puntuación correcta. |
 | `network.c` | Llama `cancel_active_transfer(client_fd)` **antes** de `remove_user(client_fd)` para garantizar que el socket del peer esté abierto al momento de enviar la notificación. |
 
 ### 6.3 Bug resuelto: emisor se desconecta a mitad de transferencia

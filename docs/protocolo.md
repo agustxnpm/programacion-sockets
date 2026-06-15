@@ -64,6 +64,8 @@ El protocolo para transferir un archivo tiene los siguientes cinco pasos:
 4. **Pausa obligatoria:** Cliente A se detiene. No envía ningún fragmento adicional hasta recibir confirmación.
 5. **ACK de fragmento y continuación:** Cliente B recibe el fragmento, lo escribe en disco y responde con `0x07/0x01`: payload `[0x01, Emisor(20)]`. El servidor rutea ese ACK al emisor correcto. Los pasos 3 a 5 se repiten hasta completar el archivo.
 
+> **Protección contra fragmentos maliciosos:** Para evitar saturación de memoria o abuso de red, tanto el servidor (antes de enrutar) como el cliente receptor (antes de escribir a disco) validan estrictamente que los fragmentos (`0x04`) no superen el límite máximo de **65536 bytes (64 KB)**. Si se detecta un fragmento de mayor tamaño, la transferencia se aborta inmediatamente y se emite un error `0x05`.
+
 ### 3.1 Nota técnica para Servidores: Rastreo de Emisores
 El servidor usa un esquema de **enrutado dirigido por emisor**:
 

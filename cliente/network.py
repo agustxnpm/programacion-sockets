@@ -33,7 +33,8 @@ class NetworkClient:
 
     def connect(self, host: str, port: int) -> None:
         """Establece la conexión TCP y lanza el hilo listener daemon."""
-        self._sock = socket.create_connection((host, port))
+        self._sock = socket.create_connection((host, port), timeout=5.0)
+        self._sock.settimeout(None) # Restablecer a bloqueante puro
         self._connected = True
         threading.Thread(target=self._listener_loop, daemon=True).start()
         self._start_heartbeat()

@@ -234,7 +234,7 @@ void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t
             /* Regla especial para Inicio de Archivo (0x03): Validar límite de 100MB */
             if (opcode == 0x03) {
                 if (length < MAX_USERNAME_LEN + 8) return; /* Mensaje inválido, le faltan los 8 bytes del tamaño */
-                
+
                 uint64_t file_size = 0;
                 unsigned char* size_ptr = (unsigned char*)payload + MAX_USERNAME_LEN;
                 /* Extraemos los 8 bytes de tamaño asumiendo formato de red (Big-Endian) a un entero de C */
@@ -243,6 +243,21 @@ void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t
                 }
                 if (file_size > MAX_FILE_SIZE) {
                     send_error(src_socket, "Archivo demasiado grande. El limite es 100 MB.");
+                    return; /* Abortamos el ruteo de este mensaje */
+                }
+            }
+
+            /* Regla especial para Chunk de Archivo (0x04): Validar tamaño máximo de chunk (64KB) */
+            if (opcode == 0x04) {
+                if (length > MAX_USERNAME_LEN + (64 * 1024)) {
+                    send_error(src_socket, "Fragmento demasiado grande. El limite es 64 KB.");
+                    
+                    /* Avisar al receptor para que no se quede bloqueado esperando */
+                    int dest_fd = get_socket_by_name(dest_name);
+                    if (dest_fd != -1) {
+                        send_error(dest_fd, "Transferencia cancelada: el emisor envió un fragmento inválido.");
+                        clear_transfer(src_socket, dest_fd);
+                    }
                     return; /* Abortamos el ruteo de este mensaje */
                 }
             }
@@ -297,7 +312,38 @@ void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t
             break;
         }
         case 0x05: { /* Error de origen interno. No se rutea bajo el protocolo. */
-            /* El cliente nunca debería enviarnos 0x05. Si lo hace, lo ignoramos. */
+            /* Si el cliente nos manda un error (ej. botón de cancelar), 
+             * limpiamos su transferencia activa y avisamos al peer. */
+            pthread_once(&transfer_once, init_transfer_table);
+            pthread_mutex_lock(&transfer_mutex);
+
+            int peer_fd = -1;
+            int i_am_sender = 0;
+
+            if (src_socket >= 0 && src_socket < MAX_FDS) {
+                if (transfer_to_recv[src_socket] != -1) {
+                    peer_fd = transfer_to_recv[src_socket];
+                    i_am_sender = 1;
+                    transfer_to_recv[src_socket] = -1;
+                    if (peer_fd >= 0 && peer_fd < MAX_FDS)
+                        transfer_to_send[peer_fd] = -1;
+                } else if (transfer_to_send[src_socket] != -1) {
+                    peer_fd = transfer_to_send[src_socket];
+                    i_am_sender = 0;
+                    transfer_to_send[src_socket] = -1;
+                    if (peer_fd >= 0 && peer_fd < MAX_FDS)
+                        transfer_to_recv[peer_fd] = -1;
+                }
+            }
+            pthread_mutex_unlock(&transfer_mutex);
+
+            if (peer_fd != -1) {
+                if (i_am_sender) {
+                    send_error(peer_fd, "Transferencia cancelada: el emisor cancelo el envio.");
+                } else {
+                    send_error(peer_fd, "Transferencia cancelada: el receptor cancelo la descarga.");
+                }
+            }
             break;
         }
         case 0x06: { /* Difusión global */

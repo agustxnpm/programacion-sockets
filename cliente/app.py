@@ -88,6 +88,11 @@ class ChatApp:
         try:
             self._net.connect(self._host, PORT)
             self._net.send(protocol.build_login(name))
+        except TimeoutError:
+            self._login_view.set_connecting(False)
+            self._login_view.set_status(
+                "Tiempo de espera agotado al conectar al servidor.", error=True
+            )
         except OSError:
             self._login_view.set_connecting(False)
             self._login_view.set_status(
@@ -95,6 +100,9 @@ class ChatApp:
                 "y que la dirección de red sea correcta.",
                 error=True
             )
+        except Exception as e:
+            self._login_view.set_connecting(False)
+            self._login_view.set_status(f"Error desconocido: {e}", error=True)
 
     def _send_private(self, dest: str, text: str):
         """Antepone el nombre del emisor para que el receptor lo muestre."""
@@ -132,6 +140,10 @@ class ChatApp:
         if self._file_ctrl:
             self._file_ctrl.abort()
             self._file_ctrl = None
+
+            # Avisar al servidor para que cancele el circuito y notifique al receptor
+            self._net.send(protocol.build_packet(0x05, b'\x01' + b"Cancelado"))
+
         self._chat_view.set_transfer_active(False)
         self._chat_view.show_system("Envío de archivo cancelado.")
 
@@ -142,6 +154,10 @@ class ChatApp:
         for recv in self._file_recvs.values():
             recv.cancel()
         self._file_recvs.clear()
+
+        # Avisar al servidor para que cancele el circuito y notifique al emisor
+        self._net.send(protocol.build_packet(0x05, b'\x01' + b"Cancelado"))
+
         self._chat_view.set_recv_active(False)
         self._chat_view.show_system("Recepción de archivo cancelada.")
 
@@ -295,6 +311,18 @@ class ChatApp:
             return
 
         chunk_data = payload[protocol.MAX_USERNAME_LEN:]
+        if len(chunk_data) > protocol.MAX_CHUNK_SIZE:
+            self._chat_view.show_error(
+                f"Transferencia abortada: fragmento excede el límite de {protocol.MAX_CHUNK_SIZE // 1024}KB."
+            )
+            file_recv.cancel()
+            del self._file_recvs[sender]
+            self._chat_view.set_recv_active(False)
+            # Enviar mensaje de error al emisor de que la transferencia ha fallado, pero 
+            # en este protocolo el cliente receptor solo puede enviar consentimientos 0x07/0x02
+            # El servidor ya lo abortaría de todas formas.
+            return
+
         try:
             pct = file_recv.write_chunk(chunk_data)
         except OSError as e:
