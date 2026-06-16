@@ -32,16 +32,16 @@ class ChatView(ctk.CTkFrame):
         on_send_broadcast(text)      — difusión a todos.
         on_send_file(dest, filepath) — envío de archivo.
         on_cancel_send()             — cancela el envío activo.
-        on_cancel_recv()             — cancela la recepción activa.
+        on_cancel_recv(sender)       — cancela la recepción activa de un emisor.
         """
         super().__init__(master, fg_color="transparent")
         self._on_send_private   = on_send_private
         self._on_send_broadcast = on_send_broadcast
         self._on_send_file      = on_send_file
         self._on_cancel_send    = on_cancel_send or (lambda: None)
-        self._on_cancel_recv    = on_cancel_recv or (lambda: None)
+        self._on_cancel_recv    = on_cancel_recv or (lambda _sender: None)
         self._user_buttons: dict[str, ctk.CTkButton] = {}
-        self._recv_base_label   = ""
+        self._recv_widgets: dict[str, dict] = {}
         self._build()
 
     # ── Construcción ──────────────────────────────────────────────────────
@@ -134,23 +134,10 @@ class ChatView(ctk.CTkFrame):
             command=lambda: self._on_cancel_send(),
         ).grid(row=0, column=2, padx=(0, 10), pady=6)
 
-        # — Barra de recepción (oculta por defecto) ───────────────────────
-        self._recv_frame = ctk.CTkFrame(main, height=34, corner_radius=0)
-        self._recv_frame.columnconfigure(1, weight=1)
-        self._recv_label = ctk.CTkLabel(
-            self._recv_frame, text="",
-            font=ctk.CTkFont(size=11), text_color="gray", anchor="w"
-        )
-        self._recv_label.grid(row=0, column=0, padx=(14, 8), sticky="w", pady=6)
-        self._recv_bar = ctk.CTkProgressBar(self._recv_frame, height=10)
-        self._recv_bar.set(0)
-        self._recv_bar.grid(row=0, column=1, padx=(0, 8), sticky="ew", pady=10)
-        ctk.CTkButton(
-            self._recv_frame, text="✕", width=32, height=22,
-            fg_color="#C0392B", hover_color="#922B21",
-            font=ctk.CTkFont(size=11),
-            command=lambda: self._on_cancel_recv(),
-        ).grid(row=0, column=2, padx=(0, 10), pady=6)
+        # — Barras de recepción (una por transferencia activa) ────────────
+        self._recv_container = ctk.CTkFrame(main, corner_radius=0, fg_color="transparent")
+        self._recv_container.grid(row=3, column=0, sticky="ew")
+        self._recv_container.columnconfigure(0, weight=1)
 
         # — Input ─────────────────────────────────────────────────────────
         input_frame = ctk.CTkFrame(main, height=62, corner_radius=0)
@@ -323,21 +310,59 @@ class ChatView(ctk.CTkFrame):
         self._transfer_label.configure(text=f"Enviando: {pct:.0f}%")
 
     def set_recv_active(self, active: bool, filename: str = "", sender: str = ""):
-        if active:
-            self._recv_base_label = (
-                f"Recibiendo: {filename}" + (f" (de {sender})" if sender else "")
-            )
-            self._recv_label.configure(text=self._recv_base_label)
-            self._recv_bar.set(0)
-            self._recv_frame.grid(row=3, column=0, sticky="ew")
-        else:
-            self._recv_frame.grid_forget()
-            self._recv_base_label = ""
+        if not sender:
+            return
 
-    def update_recv_progress(self, pct: float):
-        self._recv_bar.set(pct / 100)
-        base = self._recv_base_label or "Recibiendo"
-        self._recv_label.configure(text=f"{base}  {pct:.0f}%")
+        if active:
+            if sender in self._recv_widgets:
+                self._recv_widgets[sender]["base"] = (
+                    f"Recibiendo: {filename} (de {sender})"
+                )
+                self._recv_widgets[sender]["label"].configure(
+                    text=self._recv_widgets[sender]["base"]
+                )
+                self._recv_widgets[sender]["bar"].set(0)
+                return
+
+            frame = ctk.CTkFrame(self._recv_container, height=34, corner_radius=0)
+            frame.columnconfigure(1, weight=1)
+            frame.grid(sticky="ew", pady=2)
+
+            base = f"Recibiendo: {filename} (de {sender})"
+            label = ctk.CTkLabel(
+                frame, text=base,
+                font=ctk.CTkFont(size=11), text_color="gray", anchor="w"
+            )
+            label.grid(row=0, column=0, padx=(14, 8), sticky="w", pady=6)
+
+            bar = ctk.CTkProgressBar(frame, height=10)
+            bar.set(0)
+            bar.grid(row=0, column=1, padx=(0, 8), sticky="ew", pady=10)
+
+            ctk.CTkButton(
+                frame, text="✕", width=32, height=22,
+                fg_color="#C0392B", hover_color="#922B21",
+                font=ctk.CTkFont(size=11),
+                command=lambda s=sender: self._on_cancel_recv(s),
+            ).grid(row=0, column=2, padx=(0, 10), pady=6)
+
+            self._recv_widgets[sender] = {
+                "frame": frame,
+                "label": label,
+                "bar": bar,
+                "base": base,
+            }
+        else:
+            widgets = self._recv_widgets.pop(sender, None)
+            if widgets:
+                widgets["frame"].destroy()
+
+    def update_recv_progress(self, sender: str, pct: float):
+        widgets = self._recv_widgets.get(sender)
+        if not widgets:
+            return
+        widgets["bar"].set(pct / 100)
+        widgets["label"].configure(text=f"{widgets['base']}  {pct:.0f}%")
 
     # ── Interno ───────────────────────────────────────────────────────────
 

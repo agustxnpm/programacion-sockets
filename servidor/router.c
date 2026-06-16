@@ -59,7 +59,11 @@ static void clear_transfer(int sender_fd, int receiver_fd) {
     pthread_mutex_lock(&transfer_mutex);
     if (sender_fd >= 0 && sender_fd < MAX_FDS)
         transfer_to_recv[sender_fd] = -1;
-    if (receiver_fd >= 0 && receiver_fd < MAX_FDS)
+    /* Solo borra la referencia inversa si apunta exactamente a este emisor.
+     * En transferencias concurrentes, otro emisor puede haber registrado
+     * su entrada en transfer_to_send[receiver_fd] después y no debe pisarse. */
+    if (receiver_fd >= 0 && receiver_fd < MAX_FDS &&
+        transfer_to_send[receiver_fd] == sender_fd)
         transfer_to_send[receiver_fd] = -1;
     pthread_mutex_unlock(&transfer_mutex);
 }
@@ -81,7 +85,9 @@ void cancel_active_transfer(int fd) {
             peer_fd              = transfer_to_recv[fd];
             i_am_sender          = 1;
             transfer_to_recv[fd] = -1;
-            if (peer_fd >= 0 && peer_fd < MAX_FDS)
+            /* Borrado condicional: no pisar la entrada de otro emisor concurrente */
+            if (peer_fd >= 0 && peer_fd < MAX_FDS &&
+                transfer_to_send[peer_fd] == fd)
                 transfer_to_send[peer_fd] = -1;
         } else if (transfer_to_send[fd] != -1) {
             /* fd es el receptor */
@@ -97,8 +103,13 @@ void cancel_active_transfer(int fd) {
     if (peer_fd == -1) return;
 
     if (i_am_sender) {
-        send_error(peer_fd,
-            "Transferencia cancelada: el emisor se ha desconectado.");
+        /* Incluir nombre del emisor para que el receptor cancele solo esa sesión */
+        char sender_name[MAX_USERNAME_LEN + 1] = {0};
+        get_name_by_socket(fd, sender_name);
+        char err_msg[300];
+        snprintf(err_msg, sizeof(err_msg),
+            "Transferencia cancelada: el emisor '%s' se ha desconectado.", sender_name);
+        send_error(peer_fd, err_msg);
     } else {
         send_error(peer_fd,
             "Transferencia cancelada: el receptor se ha desconectado.");
@@ -325,7 +336,9 @@ void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t
                     peer_fd = transfer_to_recv[src_socket];
                     i_am_sender = 1;
                     transfer_to_recv[src_socket] = -1;
-                    if (peer_fd >= 0 && peer_fd < MAX_FDS)
+                    /* Borrado condicional: no pisar la entrada de otro emisor concurrente */
+                    if (peer_fd >= 0 && peer_fd < MAX_FDS &&
+                        transfer_to_send[peer_fd] == src_socket)
                         transfer_to_send[peer_fd] = -1;
                 } else if (transfer_to_send[src_socket] != -1) {
                     peer_fd = transfer_to_send[src_socket];
@@ -339,9 +352,15 @@ void route_message(int src_socket, unsigned char opcode, void* payload, uint32_t
 
             if (peer_fd != -1) {
                 if (i_am_sender) {
-                    send_error(peer_fd, "Transferencia cancelada: el emisor cancelo el envio.");
+                    /* Incluir nombre del emisor para que el receptor cancele solo esa sesión */
+                    char sender_name[MAX_USERNAME_LEN + 1] = {0};
+                    get_name_by_socket(src_socket, sender_name);
+                    char err_msg[300];
+                    snprintf(err_msg, sizeof(err_msg),
+                        "Transferencia cancelada: el emisor '%s' canceló el envío.", sender_name);
+                    send_error(peer_fd, err_msg);
                 } else {
-                    send_error(peer_fd, "Transferencia cancelada: el receptor cancelo la descarga.");
+                    send_error(peer_fd, "Transferencia cancelada: el receptor canceló la descarga.");
                 }
             }
             break;

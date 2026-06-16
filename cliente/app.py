@@ -17,6 +17,7 @@ Regla de hilo: _on_packet se registra como lambda ... root.after(0, ...)
 en el constructor, por lo que SIEMPRE se ejecuta en el hilo GUI. Ningún widget
 se toca desde el hilo listener ni desde el hilo de transferencia.
 """
+import re
 import customtkinter as ctk
 from pathlib import Path
 
@@ -118,6 +119,17 @@ class ChatApp:
 
     def _start_file_send(self, dest: str, filepath: str):
         path = Path(filepath)
+        try:
+            file_size = path.stat().st_size
+        except OSError:
+            self._chat_view.show_error("No se pudo leer el archivo seleccionado.")
+            return
+
+        # Validación temprana para evitar iniciar una transferencia inválida.
+        if file_size > protocol.MAX_FILE_SIZE:
+            self._chat_view.show_error("El archivo supera el límite permitido de 100 MB.")
+            return
+
         self._chat_view.set_transfer_active(
             True, path.name,
             label_text="Esperando confirmación de transferencia de archivo..."
@@ -147,19 +159,27 @@ class ChatApp:
         self._chat_view.set_transfer_active(False)
         self._chat_view.show_system("Envío de archivo cancelado.")
 
-    def _cancel_recv(self):
-        """Cancela todas las recepciones activas desde el botón ✕ de la barra recv."""
+    def _cancel_recv(self, sender: str | None = None):
+        """Cancela la recepción activa de un emisor; si sender es None, cancela todas."""
         if not self._file_recvs:
             return
-        for recv in self._file_recvs.values():
+
+        if sender:
+            recv = self._file_recvs.pop(sender, None)
+            if recv is None:
+                return
             recv.cancel()
-        self._file_recvs.clear()
+            self._chat_view.set_recv_active(False, sender=sender)
+            self._chat_view.show_system("Descarga cancelada por el usuario.")
+        else:
+            for sender_name, recv in list(self._file_recvs.items()):
+                recv.cancel()
+                self._chat_view.set_recv_active(False, sender=sender_name)
+            self._file_recvs.clear()
+            self._chat_view.show_system("Recepción de archivo cancelada.")
 
         # Avisar al servidor para que cancele el circuito y notifique al emisor
         self._net.send(protocol.build_packet(0x05, b'\x01' + b"Cancelado"))
-
-        self._chat_view.set_recv_active(False)
-        self._chat_view.show_system("Recepción de archivo cancelada.")
 
     # ── Router central de paquetes ────────────────────────────────────────
     # Siempre ejecutado en el hilo GUI (vía root.after en el constructor).
@@ -185,12 +205,22 @@ class ChatApp:
                 self._file_ctrl.abort()
                 self._chat_view.set_transfer_active(False)
                 self._file_ctrl = None
-            # Limpiar recepciones activas si el error indica cancelación de transferencia
+            # Cancelar solo la recepción del emisor identificado en el mensaje.
+            # El servidor incluye el nombre entre comillas simples: "el emisor 'NOMBRE'".
             if self._file_recvs and "Transferencia cancelada" in msg:
-                for recv in self._file_recvs.values():
-                    recv.cancel()
-                self._file_recvs.clear()
-                self._chat_view.set_recv_active(False)
+                m = re.search(r"el emisor '([^']+)'", msg)
+                if m:
+                    cancelled_sender = m.group(1)
+                    recv = self._file_recvs.pop(cancelled_sender, None)
+                    if recv:
+                        recv.cancel()
+                        self._chat_view.set_recv_active(False, sender=cancelled_sender)
+                else:
+                    # No se pudo identificar al emisor: cancelar todas las sesiones activas.
+                    for sn, r in list(self._file_recvs.items()):
+                        r.cancel()
+                        self._chat_view.set_recv_active(False, sender=sn)
+                    self._file_recvs.clear()
             self._chat_view.show_error(msg)
 
         elif opcode == 0x03:
@@ -252,6 +282,15 @@ class ChatApp:
                     f"Transferencia: '{username}' se ha desconectado."
                 )
                 self._file_ctrl = None
+
+            # Si el emisor desconectado estaba enviándonos un archivo, limpiar parcial.
+            recv = self._file_recvs.pop(username, None)
+            if recv:
+                recv.cancel()
+                self._chat_view.set_recv_active(False, sender=username)
+                self._chat_view.show_system(
+                    "Transferencia cancelada: el emisor se ha desconectado."
+                )
             return
 
         self._chat_view.show_broadcast(text)
@@ -305,9 +344,8 @@ class ChatApp:
         sender = protocol.parse_transfer_peer(payload)
         file_recv = self._file_recvs.get(sender)
         if file_recv is None:
-            self._chat_view.show_error(
-                f"Transferencia: fragmento recibido sin sesión activa desde '{sender}'."
-            )
+            # Puede llegar un chunk en tránsito justo después de una cancelación.
+            # Se ignora para evitar mensajes técnicos/confusos al usuario.
             return
 
         chunk_data = payload[protocol.MAX_USERNAME_LEN:]
@@ -317,7 +355,7 @@ class ChatApp:
             )
             file_recv.cancel()
             del self._file_recvs[sender]
-            self._chat_view.set_recv_active(False)
+            self._chat_view.set_recv_active(False, sender=sender)
             # Enviar mensaje de error al emisor de que la transferencia ha fallado, pero 
             # en este protocolo el cliente receptor solo puede enviar consentimientos 0x07/0x02
             # El servidor ya lo abortaría de todas formas.
@@ -328,20 +366,20 @@ class ChatApp:
         except OSError as e:
             file_recv.close()
             del self._file_recvs[sender]
-            self._chat_view.set_recv_active(False)
+            self._chat_view.set_recv_active(False, sender=sender)
             self._chat_view.show_error(
                 f"Transferencia: error al escribir fragmento de '{sender}': {e}"
             )
             return
 
-        self._chat_view.update_recv_progress(pct)
+        self._chat_view.update_recv_progress(sender, pct)
         self._net.send(protocol.build_transfer_ack_chunk(sender))
 
         if file_recv.is_complete:
             file_recv.close()
             saved_name = file_recv.filename
             del self._file_recvs[sender]
-            self._chat_view.set_recv_active(False)
+            self._chat_view.set_recv_active(False, sender=sender)
             self._chat_view.show_system(
                 f"'{saved_name}' guardado en Descargas."
             )
@@ -370,10 +408,10 @@ class ChatApp:
             self._file_ctrl.abort()
             self._file_ctrl = None
         self._chat_view.set_transfer_active(False)
-        for recv in self._file_recvs.values():
+        for sender_name, recv in list(self._file_recvs.items()):
             recv.cancel()
+            self._chat_view.set_recv_active(False, sender=sender_name)
         self._file_recvs.clear()
-        self._chat_view.set_recv_active(False)
         self._chat_view.clear_users()
         self._login_view.reset()
         self._login_view.set_status("Desconectado del servidor.", error=True)
