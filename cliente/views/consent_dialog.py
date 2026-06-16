@@ -37,6 +37,9 @@ class FileConsentDialog(ctk.CTkToplevel):
         self.lift()
         self.focus_force()
 
+        # La X del gestor de ventanas debe disparar el mismo camino que "Rechazar"
+        self.protocol("WM_DELETE_WINDOW", self._reject)
+
         self._on_accept  = on_accept
         self._on_reject  = on_reject
         self._on_timeout = on_timeout if on_timeout is not None else on_reject

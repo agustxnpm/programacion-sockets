@@ -49,6 +49,9 @@ class ChatApp:
         self._host = DEFAULT_HOST
         self._file_ctrl: FileTransferController | None = None
         self._file_recvs: dict[str, FileReceiver] = {}
+        # Sentinel único por transferencia. Los callbacks de controladores viejos
+        # lo comparan antes de actuar; si no coincide, se descartan.
+        self._transfer_sentinel: object | None = None
 
         # on_packet siempre se despacha al hilo GUI vía root.after
         self._net = NetworkClient(
@@ -130,18 +133,31 @@ class ChatApp:
             self._chat_view.show_error("El archivo supera el límite permitido de 100 MB.")
             return
 
+        # Abortar cualquier transferencia previa que pudiera estar colgada
+        # (evita que hilos huérfanos contaminen el estado de la nueva).
+        if self._file_ctrl:
+            self._file_ctrl.abort()
+            self._net.send(protocol.build_packet(0x05, b'\x01' + b"Cancelado"))
+            self._file_ctrl = None
+
         self._chat_view.set_transfer_active(
             True, path.name,
             label_text="Esperando confirmación de transferencia de archivo..."
         )
+
+        # Sentinel para esta transferencia: los callbacks lo capturan en el closure
+        # y solo actúan si sigue siendo el sentinel activo al dispararse.
+        sentinel = object()
+        self._transfer_sentinel = sentinel
+
         self._file_ctrl = FileTransferController(
             net       = self._net,
             dest      = dest,
             filepath  = path,
             root      = self._root,
             callbacks = {
-                'on_done':     self._on_transfer_done,
-                'on_error':    self._on_transfer_error,
+                'on_done':     lambda s=sentinel: self._on_transfer_done(s),
+                'on_error':    lambda msg, s=sentinel: self._on_transfer_error(msg, s),
                 'on_progress': self._chat_view.update_transfer_progress,
             },
         )
@@ -152,12 +168,11 @@ class ChatApp:
         if self._file_ctrl:
             self._file_ctrl.abort()
             self._file_ctrl = None
-
+            self._transfer_sentinel = None   # invalida callbacks pendientes de este ctrl
             # Avisar al servidor para que cancele el circuito y notifique al receptor
             self._net.send(protocol.build_packet(0x05, b'\x01' + b"Cancelado"))
-
-        self._chat_view.set_transfer_active(False)
-        self._chat_view.show_system("Envío de archivo cancelado.")
+            self._chat_view.set_transfer_active(False)
+            self._chat_view.show_system("Envío de archivo cancelado.")
 
     def _cancel_recv(self, sender: str | None = None):
         """Cancela la recepción activa de un emisor; si sender es None, cancela todas."""
@@ -203,6 +218,7 @@ class ChatApp:
             msg = payload[1:].decode('utf-8', errors='replace') if payload else "Error desconocido."
             if self._file_ctrl:
                 self._file_ctrl.abort()
+                self._transfer_sentinel = None
                 self._chat_view.set_transfer_active(False)
                 self._file_ctrl = None
             # Cancelar solo la recepción del emisor identificado en el mensaje.
@@ -277,6 +293,7 @@ class ChatApp:
             # Abortar transferencia activa si el destinatario era ese usuario
             if self._file_ctrl and self._file_ctrl._dest == username:
                 self._file_ctrl.abort()
+                self._transfer_sentinel = None
                 self._chat_view.set_transfer_active(False)
                 self._chat_view.show_error(
                     f"Transferencia: '{username}' se ha desconectado."
@@ -386,12 +403,20 @@ class ChatApp:
 
     # ── Callbacks de transferencia ────────────────────────────────────────
 
-    def _on_transfer_done(self):
+    def _on_transfer_done(self, sentinel: object | None = None):
+        # Descartar si proviene de un controlador que ya no es el activo.
+        if sentinel is not None and self._transfer_sentinel is not sentinel:
+            return
+        self._transfer_sentinel = None
         self._chat_view.set_transfer_active(False)
         self._chat_view.show_system("Archivo enviado correctamente.")
         self._file_ctrl = None
 
-    def _on_transfer_error(self, msg: str):
+    def _on_transfer_error(self, msg: str, sentinel: object | None = None):
+        # Descartar si proviene de un controlador que ya no es el activo.
+        if sentinel is not None and self._transfer_sentinel is not sentinel:
+            return
+        self._transfer_sentinel = None
         self._chat_view.set_transfer_active(False)
         self._chat_view.show_error(f"Transferencia: {msg}")
         self._file_ctrl = None
@@ -407,6 +432,7 @@ class ChatApp:
         if self._file_ctrl:
             self._file_ctrl.abort()
             self._file_ctrl = None
+        self._transfer_sentinel = None
         self._chat_view.set_transfer_active(False)
         for sender_name, recv in list(self._file_recvs.items()):
             recv.cancel()
