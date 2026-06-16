@@ -116,3 +116,104 @@ Este documento detalla los pasos a seguir para validar el correcto funcionamient
 - La interfaz de Bob debe permitir enviar mensajes de texto aunque haya una transferencia en segundo plano.
 - `Carlos` recibe el mensaje inmediatamente.
 - La transferencia de archivo hacia `Roxana` no se interrumpe y finaliza exitosamente al llegar al 100%.
+
+---
+
+## Escenario 10: Diálogo de Consentimiento con Emisor Visible y Timeout Automático
+**Pasos:**
+1. `Bob` selecciona a `Roxana` y envía un archivo por `📎`.
+2. En la ventana de `Roxana`, observar el diálogo de consentimiento de transferencia.
+3. No presionar aceptar ni rechazar; esperar 30 segundos.
+
+**Resultados esperados:**
+- El diálogo de Roxana debe mostrar claramente quién envía el archivo (ej.: `De: Bob`).
+- El diálogo debe mostrar cuenta regresiva visible hasta 0.
+- Al llegar a 0, el diálogo se cierra automáticamente y se considera rechazo por timeout.
+- En Bob, la transferencia se aborta con un mensaje claro de rechazo/timeout, sin congelar la interfaz.
+
+---
+
+## Escenario 11: Selector de Difusión con Botón # General
+**Pasos:**
+1. Con `Bob`, `Roxana` y `Carlos` conectados, en la barra lateral verificar la presencia del botón `# General`.
+2. En `Bob`, hacer clic en `# General`.
+3. Enviar el mensaje: `Mensaje de prueba global`.
+
+**Resultados esperados:**
+- El botón `# General` debe estar siempre visible y seleccionable.
+- El mensaje se envía como difusión a todos los usuarios conectados.
+- El comportamiento de difusión no depende de seleccionar el nombre propio en la lista.
+
+---
+
+## Escenario 12: Cancelación Manual de Envío (Botón ✕)
+**Pasos:**
+1. `Bob` inicia envío de archivo grande (ej. 30 MB o más) hacia `Roxana`.
+2. Mientras la barra `Enviando...` avanza, en `Bob` presionar el botón `✕` de la barra de envío.
+
+**Resultados esperados:**
+- La transferencia se aborta inmediatamente en Bob.
+- La barra de envío desaparece y la interfaz vuelve a estado normal (desbloqueada).
+- Roxana no debe quedar bloqueada esperando más datos de esa transferencia.
+
+---
+
+## Escenario 13: Cancelación Manual de Recepción (Botón ✕) y Limpieza de Parcial
+**Pasos:**
+1. `Bob` inicia envío de archivo grande a `Roxana`.
+2. En `Roxana`, cuando aparezca la barra `Recibiendo archivo...`, presionar `✕` antes del 100%.
+3. Revisar la carpeta de descargas del cliente receptor.
+
+**Resultados esperados:**
+- La recepción se cancela inmediatamente y la barra desaparece.
+- El archivo parcial debe eliminarse del disco (no debe quedar corrupto/incompleto guardado).
+- Bob recibe notificación de cancelación y su interfaz se recupera sin quedar colgada.
+
+---
+
+## Escenario 14: Desconexión Abrupta del Emisor Durante Transferencia
+**Pasos:**
+1. `Bob` comienza a enviar un archivo grande a `Roxana`.
+2. Mientras la transferencia está en curso, cerrar violentamente el cliente de Bob (`Ctrl+C` o cerrar ventana).
+
+**Resultados esperados:**
+- Roxana recibe un mensaje de error/cancelación de transferencia (vía `0x05`) en lugar de quedar esperando indefinidamente.
+- La barra de recepción de Roxana se detiene y se limpia.
+- Bob desaparece del panel de usuarios activos del resto de clientes con el mensaje de desconexión correspondiente.
+
+---
+
+## Escenario 15: Error de Red Mostrado al Usuario sin Traza Técnica
+**Pasos:**
+1. Con clientes conectados, detener el servidor abruptamente.
+2. Intentar enviar un mensaje o archivo desde cualquier cliente.
+
+**Resultados esperados:**
+- La aplicación informa un error de conexión/red en lenguaje entendible para usuario.
+- No se muestran trazas crudas del sistema operativo ni stack traces técnicos en la GUI.
+- La interfaz se mantiene estable y permite cerrar/reintentar sin colapsar.
+
+---
+
+## Escenario 16: Prueba Dirigida de Seguridad de Nombre de Archivo (Traversal)
+**Pasos:**
+1. Simular una solicitud de archivo con nombre malicioso (ej.: `../secreto.txt`, `..\\secreto.txt` o ruta absoluta) usando un cliente de prueba/controlado.
+2. Entregar esa solicitud al cliente receptor (`Roxana`).
+
+**Resultados esperados:**
+- El cliente receptor rechaza el nombre de archivo inválido y no crea archivos fuera de su carpeta de descargas.
+- La transferencia se aborta limpiamente.
+- La interfaz permanece funcional y muestra una notificación de error comprensible.
+
+---
+
+## Escenario 17: Cierre de Aplicación y Limpieza de Temporales
+**Pasos:**
+1. Ejecutar uno o más clientes y utilizar la app normalmente.
+2. Cerrar la aplicación de forma normal.
+3. Revisar el directorio del cliente para verificar residuos temporales.
+
+**Resultados esperados:**
+- El cierre no produce errores visibles para el usuario.
+- Los archivos temporales de Python (`__pycache__`) se limpian automáticamente al salir.
+- En la próxima ejecución, la aplicación inicia normalmente.
