@@ -117,27 +117,26 @@ class ChatView(ctk.CTkFrame):
         # por CTkTextbox al reinicializar su widget interno.
 
         # — Barra de envío (oculta por defecto) ────────────────────────────
-        self._transfer_frame = ctk.CTkFrame(main, height=34, corner_radius=0)
+        self._transfer_frame = ctk.CTkFrame(main, height=28, corner_radius=0)
         self._transfer_frame.columnconfigure(1, weight=1)
         self._transfer_label = ctk.CTkLabel(
             self._transfer_frame, text="",
             font=ctk.CTkFont(size=11), text_color="gray", anchor="w"
         )
-        self._transfer_label.grid(row=0, column=0, padx=(14, 8), sticky="w", pady=6)
-        self._transfer_bar = ctk.CTkProgressBar(self._transfer_frame, height=10)
+        self._transfer_label.grid(row=0, column=0, padx=(10, 8), sticky="w", pady=2)
+        self._transfer_bar = ctk.CTkProgressBar(self._transfer_frame, height=6)
         self._transfer_bar.set(0)
-        self._transfer_bar.grid(row=0, column=1, padx=(0, 8), sticky="ew", pady=10)
+        self._transfer_bar.grid(row=0, column=1, padx=(0, 8), sticky="ew", pady=2)
         ctk.CTkButton(
-            self._transfer_frame, text="✕", width=32, height=22,
+            self._transfer_frame, text="✕", width=24, height=20,
             fg_color="#C0392B", hover_color="#922B21",
             font=ctk.CTkFont(size=11),
             command=lambda: self._on_cancel_send(),
-        ).grid(row=0, column=2, padx=(0, 10), pady=6)
+        ).grid(row=0, column=2, padx=(0, 10), pady=2)
 
         # — Barras de recepción (una por transferencia activa) ────────────
-        self._recv_container = ctk.CTkFrame(main, corner_radius=0, fg_color="transparent")
-        self._recv_container.grid(row=3, column=0, sticky="ew")
-        self._recv_container.columnconfigure(0, weight=1)
+        self._recv_container = ctk.CTkScrollableFrame(main, corner_radius=0, fg_color="transparent", height=0)
+        # Se mostrará dinámicamente en row=3 cuando haya descargas activas.
 
         # — Input ─────────────────────────────────────────────────────────
         input_frame = ctk.CTkFrame(main, height=62, corner_radius=0)
@@ -324,27 +323,27 @@ class ChatView(ctk.CTkFrame):
                 self._recv_widgets[sender]["bar"].set(0)
                 return
 
-            frame = ctk.CTkFrame(self._recv_container, height=34, corner_radius=0)
+            frame = ctk.CTkFrame(self._recv_container, height=28, corner_radius=0)
             frame.columnconfigure(1, weight=1)
-            frame.grid(sticky="ew", pady=2)
+            frame.pack(fill="x", pady=1)
 
             base = f"Recibiendo: {filename} (de {sender})"
             label = ctk.CTkLabel(
                 frame, text=base,
                 font=ctk.CTkFont(size=11), text_color="gray", anchor="w"
             )
-            label.grid(row=0, column=0, padx=(14, 8), sticky="w", pady=6)
+            label.grid(row=0, column=0, padx=(10, 8), sticky="w", pady=2)
 
-            bar = ctk.CTkProgressBar(frame, height=10)
+            bar = ctk.CTkProgressBar(frame, height=6)
             bar.set(0)
-            bar.grid(row=0, column=1, padx=(0, 8), sticky="ew", pady=10)
+            bar.grid(row=0, column=1, padx=(0, 8), sticky="ew", pady=2)
 
             ctk.CTkButton(
-                frame, text="✕", width=32, height=22,
+                frame, text="✕", width=24, height=20,
                 fg_color="#C0392B", hover_color="#922B21",
                 font=ctk.CTkFont(size=11),
                 command=lambda s=sender: self._on_cancel_recv(s),
-            ).grid(row=0, column=2, padx=(0, 10), pady=6)
+            ).grid(row=0, column=2, padx=(0, 10), pady=2)
 
             self._recv_widgets[sender] = {
                 "frame": frame,
@@ -352,10 +351,22 @@ class ChatView(ctk.CTkFrame):
                 "bar": bar,
                 "base": base,
             }
+            self._update_recv_container()
         else:
             widgets = self._recv_widgets.pop(sender, None)
             if widgets:
                 widgets["frame"].destroy()
+            self._update_recv_container()
+
+    def _update_recv_container(self):
+        count = len(self._recv_widgets)
+        if count > 0:
+            # Altura dinámica: 30px por barra, hasta un máximo de 90px (3 archivos)
+            new_height = min(count * 10, 50)
+            self._recv_container.configure(height=new_height)
+            self._recv_container.grid(row=3, column=0, sticky="ew")
+        else:
+            self._recv_container.grid_forget()
 
     def update_recv_progress(self, sender: str, pct: float):
         widgets = self._recv_widgets.get(sender)
