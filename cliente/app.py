@@ -49,6 +49,7 @@ class ChatApp:
         self._host = DEFAULT_HOST
         self._file_ctrl: FileTransferController | None = None
         self._file_recvs: dict[str, FileReceiver] = {}
+        self._consent_dialogs: dict[str, FileConsentDialog] = {}
         # Sentinel único por transferencia. Los callbacks de controladores viejos
         # lo comparan antes de actuar; si no coincide, se descartan.
         self._transfer_sentinel: object | None = None
@@ -223,16 +224,22 @@ class ChatApp:
                 self._file_ctrl = None
             # Cancelar solo la recepción del emisor identificado en el mensaje.
             # El servidor incluye el nombre entre comillas simples: "el emisor 'NOMBRE'".
-            if self._file_recvs and "Transferencia cancelada" in msg:
+            if "Transferencia cancelada" in msg:
                 m = re.search(r"el emisor '([^']+)'", msg)
                 if m:
                     cancelled_sender = m.group(1)
+                    dialog = self._consent_dialogs.pop(cancelled_sender, None)
+                    if dialog:
+                        dialog.force_close()
                     recv = self._file_recvs.pop(cancelled_sender, None)
                     if recv:
                         recv.cancel()
                         self._chat_view.set_recv_active(False, sender=cancelled_sender)
                 else:
                     # No se pudo identificar al emisor: cancelar todas las sesiones activas.
+                    for dialog in list(self._consent_dialogs.values()):
+                        dialog.force_close()
+                    self._consent_dialogs.clear()
                     for sn, r in list(self._file_recvs.items()):
                         r.cancel()
                         self._chat_view.set_recv_active(False, sender=sn)
@@ -300,6 +307,11 @@ class ChatApp:
                 )
                 self._file_ctrl = None
 
+            # Cerrar dialogos pendientes de este usuario
+            dialog = self._consent_dialogs.pop(username, None)
+            if dialog:
+                dialog.force_close()
+
             # Si el emisor desconectado estaba enviándonos un archivo, limpiar parcial.
             recv = self._file_recvs.pop(username, None)
             if recv:
@@ -326,6 +338,7 @@ class ChatApp:
             return
 
         def on_accept():
+            self._consent_dialogs.pop(sender, None)
             if sender in self._file_recvs:
                 self._net.send(protocol.build_transfer_ack_consent(sender, False))
                 self._chat_view.show_error(
@@ -344,16 +357,19 @@ class ChatApp:
             self._chat_view.set_recv_active(True, filename, sender)
 
         def on_reject():
+            self._consent_dialogs.pop(sender, None)
             self._net.send(protocol.build_transfer_ack_consent(sender, False))
             self._chat_view.show_system(f"Archivo '{filename}' de '{sender}' rechazado.")
 
         def on_timeout():
+            self._consent_dialogs.pop(sender, None)
             self._net.send(protocol.build_transfer_ack_consent(sender, False))
             self._chat_view.show_system(
                 f"Se agotó el tiempo de espera para el archivo de '{sender}'."
             )
 
-        FileConsentDialog(self._root, filename, size, sender, on_accept, on_reject, on_timeout)
+        dialog = FileConsentDialog(self._root, filename, size, sender, on_accept, on_reject, on_timeout)
+        self._consent_dialogs[sender] = dialog
 
     def _handle_incoming_chunk(self, payload: bytes):
         if len(payload) < protocol.MAX_USERNAME_LEN:
@@ -434,6 +450,9 @@ class ChatApp:
             self._file_ctrl = None
         self._transfer_sentinel = None
         self._chat_view.set_transfer_active(False)
+        for dialog in list(self._consent_dialogs.values()):
+            dialog.force_close()
+        self._consent_dialogs.clear()
         for sender_name, recv in list(self._file_recvs.items()):
             recv.cancel()
             self._chat_view.set_recv_active(False, sender=sender_name)

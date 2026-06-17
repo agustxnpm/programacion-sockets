@@ -129,3 +129,8 @@ class FileConsentDialog(ctk.CTkToplevel):
         self._closed = True
         self._on_reject()
         self.destroy()
+
+    def force_close(self):
+        if not self._closed:
+            self._closed = True
+            self.destroy()
